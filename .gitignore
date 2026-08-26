@@ -1,0 +1,118 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Contour — .gitignore
+#
+# NOT ignored, on purpose (these belong in history):
+#   .github/            CI workflow — evidence of process, graded under code quality
+#   .env.example        documents every setting; the real .env is ignored below
+#   contours_1m.kml     sample contour map the demo and tests depend on
+#   data/**/.gitkeep    keeps otherwise-empty runtime dirs in the tree
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Secrets — never commit ───────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+!.env.example
+*.pem
+*.key
+!**/requirements*.txt
+credentials.json
+service-account*.json
+
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+.Python
+build/
+dist/
+*.egg
+*.egg-info/
+pip-wheel-metadata/
+
+# ── Virtual environments ─────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+.direnv/
+docs
+.github
+# ── Test / lint / type-check caches ──────────────────────────────────────────
+.pytest_cache/
+.hypothesis/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.ruff_cache/
+.tox/
+.nox/
+.cache/
+
+# ── Coverage ─────────────────────────────────────────────────────────────────
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+*.cover
+
+# ── Node / frontend ──────────────────────────────────────────────────────────
+node_modules/
+frontend/dist/
+frontend/.vite/
+npm-debug.log*
+yarn-error.log*
+.pnpm-store/
+
+# ── Generated geospatial data ────────────────────────────────────────────────
+# DEM tiles, derivatives and COGs are cached artefacts, re-downloadable or
+# recomputable. Negations keep the door open for a deliberately committed test
+# fixture raster.
+data/cache/*
+!data/cache/.gitkeep
+data/seed/*
+!data/seed/.gitkeep
+*.tif
+*.tiff
+*.vrt
+*.gpkg
+*.shp
+*.shx
+*.dbf
+*.prj
+!backend/app/tests/fixtures/**
+
+# ── Generated reports ────────────────────────────────────────────────────────
+reports/
+*.generated.pdf
+
+# ── Databases ────────────────────────────────────────────────────────────────
+*.sqlite
+*.sqlite3
+*.db
+pgdata/
+
+# ── Logs & scratch ───────────────────────────────────────────────────────────
+*.log
+logs/
+tmp/
+.tmp/
+scratch/
+
+# ── Notebooks ────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+
+# ── Editors & OS ─────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Local tool state ─────────────────────────────────────────────────────────
+.claude/settings.local.json

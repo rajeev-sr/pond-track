@@ -1,0 +1,68 @@
+[project]
+name = "contour-backend"
+version = "0.1.0"
+description = "AI-based Village Pond Planning System - backend"
+requires-python = ">=3.11"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["alembic/versions"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM", "RUF", "ARG", "PTH"]
+ignore = [
+  "B008",    # FastAPI Depends() in defaults is the documented idiom
+  "RUF012",  # mutable class attrs: pydantic Settings fields are fine
+]
+
+[tool.ruff.lint.per-file-ignores]
+"app/tests/*" = ["ARG", "S101"]
+# N818 wants exception classes to end in "Error". These deliberately end in
+# "Problem" to match RFC 7807 terminology and the application/problem+json
+# media type they serialise to -- the base class (ProblemError) does carry the
+# suffix. A documented deviation, not an oversight.
+"app/core/errors.py" = ["N818"]
+"alembic/env.py" = ["ARG", "F401"]
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+extend-exclude = "alembic/versions"
+
+[tool.mypy]
+python_version = "3.11"
+plugins = ["pydantic.mypy"]
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = false
+ignore_missing_imports = true
+exclude = ["alembic/", "app/tests/"]
+
+[[tool.mypy.overrides]]
+# The domain layer is where correctness matters most - strict here.
+module = ["app.core.*", "app.services.*"]
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+
+[tool.pytest.ini_options]
+testpaths = ["app/tests"]
+pythonpath = ["."]
+addopts = "-ra --strict-markers"
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+  "integration: needs a live database or redis",
+  "network: hits an external provider (skipped in CI)",
+  "slow: takes more than a few seconds",
+]
+filterwarnings = ["ignore::DeprecationWarning:pysheds.*"]
+
+[tool.coverage.run]
+source = ["app/core", "app/services"]
+omit = ["*/tests/*", "*/__init__.py"]
+
+[tool.coverage.report]
+exclude_lines = ["pragma: no cover", "if TYPE_CHECKING:", "raise NotImplementedError"]

@@ -1,0 +1,113 @@
+name: contour
+
+x-backend-env: &backend-env
+  ENV: ${ENV:-development}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  LOG_JSON: ${LOG_JSON:-true}
+  DEMO_MODE: ${DEMO_MODE:-false}
+  POSTGRES_HOST: postgis
+  POSTGRES_PORT: 5432
+  POSTGRES_DB: ${POSTGRES_DB:-contour}
+  POSTGRES_USER: ${POSTGRES_USER:-contour}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-contour_dev_only_change_me}
+  REDIS_URL: redis://redis:6379/0
+  COG_STORE_PATH: /data/cache
+  # /vsicurl tuning for reading remote COGs (Copernicus GLO-30 on AWS).
+  # Without READDIR_ON_OPEN=EMPTY_DIR, GDAL lists the bucket prefix on every
+  # open, which turns a 101 KB windowed read into a multi-second stall.
+  GDAL_DISABLE_READDIR_ON_OPEN: EMPTY_DIR
+  CPL_VSIL_CURL_ALLOWED_EXTENSIONS: ".tif,.tiff,.vrt"
+  GDAL_HTTP_MAX_RETRY: "3"
+  GDAL_HTTP_RETRY_DELAY: "1"
+  GDAL_CACHEMAX: "256"
+  VSI_CACHE: "TRUE"
+  VSI_CACHE_SIZE: "26214400"
+  TITILER_ENDPOINT: http://titiler:8000
+  OPENTOPOGRAPHY_API_KEY: ${OPENTOPOGRAPHY_API_KEY:-}
+  DATA_GOV_IN_API_KEY: ${DATA_GOV_IN_API_KEY:-}
+  BHUVAN_TOKEN: ${BHUVAN_TOKEN:-}
+  BHOONIDHI_API_KEY: ${BHOONIDHI_API_KEY:-}
+  COPERNICUS_CLIENT_ID: ${COPERNICUS_CLIENT_ID:-}
+  COPERNICUS_CLIENT_SECRET: ${COPERNICUS_CLIENT_SECRET:-}
+  MAX_AOI_KM2: ${MAX_AOI_KM2:-100}
+  DEFAULT_DEM_SOURCE: ${DEFAULT_DEM_SOURCE:-COP30}
+  AOI_BUFFER_M: ${AOI_BUFFER_M:-500}
+  SUITABILITY_ALPHA: ${SUITABILITY_ALPHA:-0.6}
+  CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173,http://localhost:8080}
+
+services:
+  postgis:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-contour}
+      POSTGRES_USER: ${POSTGRES_USER:-contour}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-contour_dev_only_change_me}
+    command: ["postgres", "-c", "shared_buffers=256MB", "-c", "max_connections=100"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports: ["${POSTGRES_HOST_PORT:-5432}:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-contour} -d ${POSTGRES_DB:-contour}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    ports: ["${REDIS_HOST_PORT:-6379}:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: ./backend
+      target: dev
+    environment: *backend-env
+    volumes:
+      - ./backend:/srv
+      - ./data:/data
+    ports: ["${API_HOST_PORT:-8000}:8000"]
+    depends_on:
+      postgis: {condition: service_healthy}
+      redis: {condition: service_healthy}
+
+  # Wired up in M6 (Celery orchestration). Present now so the topology is real.
+  celery-worker:
+    build:
+      context: ./backend
+      target: dev
+    command: ["celery", "-A", "app.workers.celery_app", "worker", "--loglevel=INFO", "--concurrency=2"]
+    environment: *backend-env
+    volumes:
+      - ./backend:/srv
+      - ./data:/data
+    depends_on:
+      redis: {condition: service_healthy}
+      postgis: {condition: service_healthy}
+    profiles: ["workers"]
+
+  # Serves DEM/derivative COGs as XYZ tiles. Used from M2 onward.
+  titiler:
+    image: ghcr.io/developmentseed/titiler:0.19.0
+    environment:
+      TITILER_API_CORS_ORIGINS: "*"
+      GDAL_CACHEMAX: "128"
+      GDAL_DISABLE_READDIR_ON_OPEN: "EMPTY_DIR"
+    volumes:
+      - ./data:/data:ro
+    ports: ["${TITILER_HOST_PORT:-8001}:8000"]
+    profiles: ["tiles"]
+
+  frontend:
+    build:
+      context: ./frontend
+    ports: ["${FRONTEND_HOST_PORT:-8080}:80"]
+    depends_on: [api]
+    profiles: ["ui"]
+
+volumes:
+  pgdata:
