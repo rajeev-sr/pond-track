@@ -16,6 +16,7 @@ from typing import Any
 
 from geoalchemy2 import Geometry
 from sqlalchemy import (
+    Boolean,
     DateTime,
     Float,
     ForeignKey,
@@ -24,6 +25,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    false,
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -230,3 +232,98 @@ class Analysis(Base):
     village: Mapped[Village | None] = relationship(lazy="joined")
 
     __table_args__ = (Index("ix_analyses_state_created", "state", "created_at"),)
+
+
+class Catchment(Base):
+    """A delineated contributing area, with the provenance to read it by.
+
+    `analysis_id` and `village_id` are both nullable: a catchment delineated from
+    an uploaded contour map belongs to neither, and forcing one would mean
+    inventing a row.
+
+    Two columns exist purely so a stored result stays interpretable. A catchment
+    delineated over a heavily filled surface deserves less confidence than one
+    over terrain that drained on its own, and six months later nobody will
+    remember which it was -- so `conditioning_method` and `cells_filled` are
+    recorded. `touches_survey_edge` means part of the contributing area lay
+    outside the map, making `area_ha` a lower bound rather than a measurement.
+    """
+
+    __tablename__ = "catchments"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    analysis_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("analyses.id", ondelete="CASCADE"), index=True
+    )
+    village_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("villages.id", ondelete="SET NULL"), index=True
+    )
+
+    #: Where the water leaves, and where the caller actually asked. The two differ
+    #: by the snap, and storing only the outlet loses the question that was asked.
+    outlet: Mapped[Any] = mapped_column(
+        Geometry("POINT", srid=4326, spatial_index=True), nullable=False
+    )
+    requested_point: Mapped[Any | None] = mapped_column(
+        Geometry("POINT", srid=4326, spatial_index=True)
+    )
+    snap_moved_m: Mapped[float | None] = mapped_column(Float)
+
+    geom: Mapped[Any] = mapped_column(
+        Geometry("MULTIPOLYGON", srid=4326, spatial_index=True), nullable=False
+    )
+    area_ha: Mapped[float] = mapped_column(Float, nullable=False)
+    perimeter_m: Mapped[float | None] = mapped_column(Float)
+    relief_m: Mapped[float | None] = mapped_column(Float)
+    mean_slope_pct: Mapped[float | None] = mapped_column(Float)
+    longest_flow_path_m: Mapped[float | None] = mapped_column(Float)
+    time_of_concentration_min: Mapped[float | None] = mapped_column(Float)
+    form_factor: Mapped[float | None] = mapped_column(Float)
+    compactness_coefficient: Mapped[float | None] = mapped_column(Float)
+
+    dem_source: Mapped[str | None] = mapped_column(String(40))
+    resolution_m: Mapped[float | None] = mapped_column(Float)
+    #: fill | breach_then_fill
+    conditioning_method: Mapped[str | None] = mapped_column(String(24))
+    cells_filled: Mapped[int | None] = mapped_column(Integer)
+    touches_survey_edge: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=false()
+    )
+    confidence: Mapped[str | None] = mapped_column(String(16))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class Stream(Base):
+    """One Strahler stream of a drainage network.
+
+    A row runs from where the channel attains its order to where it loses it --
+    not from junction to junction. Storing segments instead would make the row
+    counts violate Horton's law of stream numbers, which is how the distinction
+    was found in the first place.
+
+    `threshold_ha` is stored with the result because it is the one free parameter
+    of stream extraction and it decides everything downstream: the same terrain at
+    0.5 ha and at 25 ha gives 720 reaches and 18.
+    """
+
+    __tablename__ = "streams"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    catchment_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("catchments.id", ondelete="CASCADE"), index=True
+    )
+    analysis_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("analyses.id", ondelete="CASCADE"), index=True
+    )
+    geom: Mapped[Any] = mapped_column(
+        Geometry("LINESTRING", srid=4326, spatial_index=True), nullable=False
+    )
+    strahler_order: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    length_m: Mapped[float] = mapped_column(Float, nullable=False)
+    upstream_area_ha: Mapped[float | None] = mapped_column(Float)
+    threshold_ha: Mapped[float] = mapped_column(Float, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )

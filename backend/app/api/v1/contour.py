@@ -13,6 +13,7 @@ specific reason. No domain logic lives here (HLD 2.1).
 
 from __future__ import annotations
 
+import math
 import uuid
 from pathlib import Path
 from typing import Annotated, Any
@@ -29,7 +30,9 @@ from app.providers.elevation.contour_kml import (
     parse_contour_file,
 )
 from app.schemas.contour import ContourAnalysisResponse, ContourMapUploadResponse
-from app.services import contours, derivatives, raster, siting
+from app.services import conditioning as conditioning_service
+from app.services import contours, derivatives, raster, siting, streams
+from app.services import hydrology as hyd
 from app.services.contour_analysis import (
     DEFAULT_SNAP_RADIUS_M,
     DEFAULT_STREAM_THRESHOLD_HA,
@@ -40,6 +43,9 @@ from app.services.geometry import (
     bbox_geojson,
     contour_lines_to_geojson,
     contours_to_geojson,
+    mask_to_geojson,
+    point_geojson,
+    reaches_to_geojson,
 )
 from app.services.interpolate import MAX_CELL_M, MIN_CELL_M, contours_to_dem
 
@@ -452,6 +458,289 @@ async def terrain_derivatives(
             "`docker compose up -d titiler`."
         ),
     }
+
+
+@router.post(
+    "/hydrology/catchment",
+    summary="Delineate the catchment above any point (M3-9b, FR-4)",
+    description=(
+        "Given a `dem_id` and a coordinate, returns the land that drains to "
+        "that point: the polygon, the morphometrics, and how far the point had "
+        "to move to reach a channel.\n\n"
+        "This is the interactive form of what `/analyzeContour` does at its "
+        "ranked sites. Clicking three different points gives three visibly "
+        "different catchments, which is how a reader checks the routing is "
+        "doing something rather than taking it on trust.\n\n"
+        "**Snapping matters more than it looks.** A click a few metres off the "
+        "channel lands on a hillside cell whose catchment is the hillside -- a "
+        "few hectares rather than a few hundred. The point is moved to the "
+        "highest-accumulation cell within `snap_radius_m`, and the response says "
+        "how far it moved so the caller can tell a nudge from a relocation."
+    ),
+)
+async def hydrology_catchment(
+    dem_id: Annotated[str, Form(description="From /analyzeContour or /terrain/contour-map.")],
+    lon: Annotated[float, Form(ge=-180, le=180, description="Pour point longitude.")],
+    lat: Annotated[float, Form(ge=-90, le=90, description="Pour point latitude.")],
+    snap_radius_m: Annotated[
+        float,
+        Form(
+            ge=0,
+            le=2000,
+            description=(
+                "How far the point may be moved onto the drainage line. Zero "
+                "delineates exactly where you clicked, which is usually not what "
+                "you meant."
+            ),
+        ),
+    ] = DEFAULT_SNAP_RADIUS_M,
+    conditioning: Annotated[
+        str,
+        Form(
+            description=(
+                "How to make the surface routable: `fill` raises every depression "
+                "to its spill level; `breach` carves outlets through thin barriers "
+                "first, preserving the hollows a pond would occupy; `auto` breaches "
+                "when more than 15 % of the surface has no usable gradient. The "
+                "response reports which was used and how much of the terrain was "
+                "altered."
+            )
+        ),
+    ] = "auto",
+) -> Any:
+    entry = _PARSED_CACHE.get(dem_id)
+    if entry is None:
+        raise NotFoundProblem(
+            detail=(
+                f"no parsed contour map with id {dem_id!r}. Upload one via "
+                "POST /api/v1/terrain/contour-map first; parsed maps are held in "
+                "memory and do not survive a restart."
+            ),
+            dem_id=dem_id,
+        )
+
+    dem = entry["dem"]
+
+    def _delineate() -> Any:
+        from pyproj import Transformer
+
+        to_grid = Transformer.from_crs(4326, dem.epsg, always_xy=True)
+        x, y = to_grid.transform(lon, lat)
+        # A coordinate far outside the working UTM zone projects to infinity, and
+        # `rowcol` raises OverflowError rather than IndexError trying to floor it.
+        # Checking for a finite result covers both, and every other way a
+        # projection can fail to produce a usable number.
+        if not (math.isfinite(x) and math.isfinite(y)):
+            raise _PourPointOutsideError(lon, lat)
+        try:
+            row, col = dem.rowcol(float(x), float(y))
+        except (IndexError, OverflowError, ValueError) as exc:
+            raise _PourPointOutsideError(lon, lat) from exc
+
+        conditioned, conditioning_report = conditioning_service.condition(dem, method=conditioning)
+        flow = hyd.build_flow(dem, conditioned)
+        catchment = hyd.delineate_catchment(
+            dem,
+            flow,
+            row,
+            col,
+            snap_radius_cells=int(round(snap_radius_m / dem.cell_size_m)),
+        )
+        # Slope on the *original* surface: a filled hollow reads as 0 % exactly
+        # where a pond would go, so the conditioned surface is the wrong one for
+        # any question about the ground.
+        slope = hyd.slope_percent(dem.elevation, dem.cell_size_m)
+        metrics = hyd.catchment_metrics(dem, conditioned, flow, catchment, slope)
+        geometry = mask_to_geojson(catchment.mask, dem)
+        return catchment, metrics, geometry, conditioning_report
+
+    try:
+        catchment, metrics, geometry, conditioning_report = await run_in_threadpool(_delineate)
+    except _PourPointOutsideError as exc:
+        raise UnanswerableProblem(detail=str(exc)) from exc
+    except ValueError as exc:
+        raise ValidationProblem(
+            detail=str(exc),
+            errors=[{"field": "conditioning", "message": str(exc)}],
+        ) from exc
+
+    if geometry is None:
+        raise UnanswerableProblem(
+            detail=(
+                "the catchment came out empty, which means the point sits on a "
+                "cell with no valid elevation. Pick a point inside the surveyed "
+                "area."
+            )
+        )
+
+    outlet_lon, outlet_lat = _outlet_lonlat(dem, catchment)
+    moved_m = round(catchment.snap_distance_m, 1)
+    return {
+        "dem_id": dem_id,
+        "requested": point_geojson(lon, lat),
+        "outlet": point_geojson(outlet_lon, outlet_lat),
+        "snapped": {
+            "was_snapped": catchment.snapped_from is not None,
+            "moved_m": moved_m,
+            # The effective radius, which is the requested one rounded to whole
+            # cells -- the search works in cells, so 150 m at 5 m is exactly 30.
+            "search_radius_m": round(
+                int(round(snap_radius_m / dem.cell_size_m)) * dem.cell_size_m, 1
+            ),
+            # A move close to the radius means the search ran out of room rather
+            # than finding the channel, so the answer deserves less confidence.
+            "hit_the_search_limit": bool(
+                snap_radius_m > 0 and moved_m >= snap_radius_m - dem.cell_size_m
+            ),
+        },
+        "metrics": metrics,
+        # How the surface was made routable, and how much of the terrain that
+        # altered. A catchment delineated over a heavily filled surface deserves
+        # less confidence than one over terrain that drained on its own, and this
+        # is the only place that shows.
+        "conditioning": conditioning_report,
+        "geometry": geometry,
+    }
+
+
+@router.post(
+    "/hydrology/streams",
+    summary="Drainage network with Strahler order (M3-3)",
+    description=(
+        "Thresholds the flow accumulation of the DEM behind a `dem_id`, "
+        "vectorises the resulting channels, and orders them by Strahler.\n\n"
+        "A catchment outline says how much land drains to a point; this says "
+        "*where the water goes on the way*. For siting that is often the more "
+        "useful picture -- the same location on a first-order headwater collects "
+        "from a few hectares and on a fourth-order channel from hundreds, and "
+        "needs a spillway sized accordingly.\n\n"
+        "A reach is a Strahler stream: it runs from where it attains its order "
+        "to where it loses it, not from junction to junction. Cutting at every "
+        "junction breaks Horton's law of stream numbers.\n\n"
+        "Pass a pour point to restrict the network to that catchment, which is "
+        "also what makes the drainage density meaningful -- density over an "
+        "arbitrary rectangle is a property of the rectangle."
+    ),
+)
+async def hydrology_streams(
+    dem_id: Annotated[str, Form(description="From /analyzeContour or /terrain/contour-map.")],
+    threshold_ha: Annotated[
+        float,
+        Form(
+            gt=0,
+            le=10_000,
+            description=(
+                "Contributing area at which a channel begins. In hectares rather "
+                "than cells, so the same value means the same thing at 5 m and at "
+                "30 m. 1 ha is deliberately small for village terrain: a nala "
+                "draining a few hectares is exactly what a check dam sits on."
+            ),
+        ),
+    ] = streams.DEFAULT_THRESHOLD_HA,
+    lon: Annotated[
+        float | None,
+        Form(ge=-180, le=180, description="Pour point longitude, to restrict to one catchment."),
+    ] = None,
+    lat: Annotated[float | None, Form(ge=-90, le=90, description="Pour point latitude.")] = None,
+    snap_radius_m: Annotated[
+        float,
+        Form(
+            ge=0,
+            le=2000,
+            description="How far the pour point may be nudged onto a channel.",
+        ),
+    ] = DEFAULT_SNAP_RADIUS_M,
+) -> Any:
+    entry = _PARSED_CACHE.get(dem_id)
+    if entry is None:
+        raise NotFoundProblem(
+            detail=(
+                f"no parsed contour map with id {dem_id!r}. Upload one via "
+                "POST /api/v1/terrain/contour-map first; parsed maps are held in "
+                "memory and do not survive a restart."
+            ),
+            dem_id=dem_id,
+        )
+    if (lon is None) != (lat is None):
+        raise ValidationProblem(
+            detail="give both lon and lat to restrict the network to a catchment, or neither.",
+            errors=[{"field": "lon" if lon is None else "lat", "message": "required together"}],
+        )
+
+    dem = entry["dem"]
+
+    def _extract() -> Any:
+        conditioned = hyd.fill_depressions(dem)
+        flow = hyd.build_flow(dem, conditioned)
+        catchment = None
+        if lon is not None and lat is not None:
+            from pyproj import Transformer
+
+            to_grid = Transformer.from_crs(4326, dem.epsg, always_xy=True)
+            x, y = to_grid.transform(lon, lat)
+            if not (math.isfinite(x) and math.isfinite(y)):
+                raise _PourPointOutsideError(lon, lat)
+            try:
+                row, col = dem.rowcol(float(x), float(y))
+            except (IndexError, OverflowError, ValueError) as exc:
+                raise _PourPointOutsideError(lon, lat) from exc
+            catchment = hyd.delineate_catchment(
+                dem,
+                flow,
+                row,
+                col,
+                snap_radius_cells=int(round(snap_radius_m / dem.cell_size_m)),
+            )
+        network = streams.extract(
+            flow,
+            transform=dem.transform,
+            cell_size_m=dem.cell_size_m,
+            threshold_ha=threshold_ha,
+            within=catchment,
+        )
+        return network, catchment
+
+    try:
+        network, catchment = await run_in_threadpool(_extract)
+    except _PourPointOutsideError as exc:
+        raise UnanswerableProblem(detail=str(exc)) from exc
+    except streams.StreamExtractionError as exc:
+        raise UnanswerableProblem(detail=str(exc)) from exc
+
+    body: dict[str, Any] = {
+        "dem_id": dem_id,
+        "network": network.report(),
+        "streams": reaches_to_geojson(network.reaches, dem.epsg),
+    }
+    if catchment is not None:
+        body["catchment"] = {
+            "area_ha": round(catchment.area_m2 / 10_000.0, 3),
+            "area_km2": round(catchment.area_m2 / 1e6, 5),
+            "outlet": point_geojson(*_outlet_lonlat(dem, catchment)),
+            "snapped": {
+                "was_snapped": catchment.snapped_from is not None,
+                "distance_m": round(catchment.snap_distance_m, 1),
+            },
+        }
+    return body
+
+
+class _PourPointOutsideError(Exception):
+    """The requested pour point is not inside the surveyed area."""
+
+    def __init__(self, lon: float, lat: float) -> None:
+        super().__init__(
+            f"({lat}, {lon}) is outside the surveyed area. The contour map covers "
+            "only its own extent; pick a point inside it."
+        )
+
+
+def _outlet_lonlat(dem: Any, catchment: Any) -> tuple[float, float]:
+    from pyproj import Transformer
+
+    to_wgs84 = Transformer.from_crs(dem.epsg, 4326, always_xy=True)
+    lon, lat = to_wgs84.transform(*catchment.outlet_xy)
+    return float(lon), float(lat)
 
 
 @router.post(
