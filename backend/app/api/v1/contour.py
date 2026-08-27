@@ -14,11 +14,13 @@ specific reason. No domain logic lives here (HLD 2.1).
 from __future__ import annotations
 
 import uuid
+from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from fastapi.concurrency import run_in_threadpool
 
+from app.config import get_settings
 from app.core.errors import NotFoundProblem, UnanswerableProblem, ValidationProblem
 from app.core.logging import get_logger
 from app.providers.elevation.contour_kml import (
@@ -27,14 +29,18 @@ from app.providers.elevation.contour_kml import (
     parse_contour_file,
 )
 from app.schemas.contour import ContourAnalysisResponse, ContourMapUploadResponse
-from app.services import siting
+from app.services import contours, derivatives, raster, siting
 from app.services.contour_analysis import (
     DEFAULT_SNAP_RADIUS_M,
     DEFAULT_STREAM_THRESHOLD_HA,
     ContourAnalysisOptions,
     analyze_contour_map,
 )
-from app.services.geometry import bbox_geojson, contours_to_geojson
+from app.services.geometry import (
+    bbox_geojson,
+    contour_lines_to_geojson,
+    contours_to_geojson,
+)
 from app.services.interpolate import MAX_CELL_M, MIN_CELL_M, contours_to_dem
 
 router = APIRouter(tags=["contour"])
@@ -234,6 +240,11 @@ async def _run(file: UploadFile, opts: ContourAnalysisOptions) -> Any:
         raise _as_unanswerable(exc, name) from exc
 
     body = result.as_dict()
+    # Hand back a handle on the interpolated DEM so the caller can ask for
+    # terrain tiles (POST /terrain/derivatives) without uploading the file a
+    # second time. The analysis already holds the grid; re-parsing 6 MB of KML to
+    # get back to it would be pure waste.
+    body["dem_id"] = _remember(result.parsed, result.dem, result.interpolation)
     if opts.include_contours:
         body["contours"] = contours_to_geojson(result.parsed.lines)
     log.info(
@@ -327,6 +338,202 @@ async def upload_contour_map(
         "interpolated_terrain": report.as_dict(),
         "area_of_interest": bbox_geojson(*parsed.bounds.as_tuple()),
         "warnings": parsed.warnings,
+    }
+
+
+@router.post(
+    "/terrain/derivatives",
+    summary="Slope and hillshade as map tiles (M2-3, M2-4)",
+    description=(
+        "Writes the DEM behind a `dem_id` as Cloud-Optimized GeoTIFFs -- "
+        "elevation, Horn slope, and shaded relief -- and returns XYZ tile "
+        "templates the browser can use directly.\n\n"
+        "HLD ADR-3 is why this exists: a 5 m DEM over 8.5 km2 is 342,550 cells, "
+        "and shipping that as JSON freezes the tab. As a COG the browser fetches "
+        "only the 256x256 tiles it can see.\n\n"
+        "The rasters are content-addressed on the elevation grid itself, so "
+        "asking twice for the same DEM reuses them -- `reused` says which."
+    ),
+)
+async def terrain_derivatives(
+    dem_id: Annotated[str, Form(description="From POST /terrain/contour-map.")],
+    products: Annotated[
+        str,
+        Form(description="Comma-separated: dem, slope, hillshade. Default all three."),
+    ] = "dem,slope,hillshade",
+    hillshade_azimuth_deg: Annotated[
+        float, Form(ge=0, le=360, description="Light direction, compass degrees.")
+    ] = raster.DEFAULT_AZIMUTH_DEG,
+    hillshade_altitude_deg: Annotated[
+        float, Form(gt=0, le=90, description="Light elevation above the horizon.")
+    ] = raster.DEFAULT_ALTITUDE_DEG,
+    hillshade_z_factor: Annotated[
+        float,
+        Form(
+            gt=0,
+            le=20,
+            description=(
+                "Vertical exaggeration. Indian plateau relief of 30 m over 3 km is "
+                "nearly invisible at 1.0; 3 to 5 reads well."
+            ),
+        ),
+    ] = raster.DEFAULT_Z_FACTOR,
+) -> Any:
+    entry = _PARSED_CACHE.get(dem_id)
+    if entry is None:
+        raise NotFoundProblem(
+            detail=(
+                f"no parsed contour map with id {dem_id!r}. Upload one via "
+                "POST /api/v1/terrain/contour-map first; parsed maps are held in "
+                "memory and do not survive a restart."
+            ),
+            dem_id=dem_id,
+        )
+
+    requested = tuple(p.strip().lower() for p in products.split(",") if p.strip())
+    unknown = [p for p in requested if p not in derivatives.ALL_PRODUCTS]
+    if unknown:
+        raise ValidationProblem(
+            detail=(
+                f"unknown product(s) {unknown}. Choose from " f"{list(derivatives.ALL_PRODUCTS)}."
+            ),
+            errors=[{"field": "products", "message": f"unknown: {unknown}"}],
+        )
+    if not requested:
+        raise ValidationProblem(
+            detail="no products requested; name at least one of dem, slope, hillshade.",
+            errors=[{"field": "products", "message": "empty"}],
+        )
+
+    dem = entry["dem"]
+    settings = get_settings()
+    store = Path(settings.COG_STORE_PATH) / "cog"
+
+    def _build() -> Any:
+        # No database session: the rasters are useful without one, and the
+        # contour endpoints deliberately work with no database at all.
+        return derivatives.build(
+            None,
+            elevation=dem.elevation,
+            transform=dem.transform,
+            epsg=dem.epsg,
+            cell_size_m=dem.cell_size_m,
+            store=store,
+            products=tuple(requested),  # type: ignore[arg-type]
+            hillshade_azimuth_deg=hillshade_azimuth_deg,
+            hillshade_altitude_deg=hillshade_altitude_deg,
+            hillshade_z_factor=hillshade_z_factor,
+        )
+
+    try:
+        layers = await run_in_threadpool(_build)
+    except raster.RasterWriteError as exc:
+        log.error("cog_write_failed", dem_id=dem_id, detail=str(exc))
+        raise UnanswerableProblem(
+            detail=f"the terrain could not be written as a tiled raster: {exc}"
+        ) from exc
+
+    first = layers[0].asset
+    return {
+        "dem_id": dem_id,
+        "working_crs": f"EPSG:{first.epsg}",
+        "resolution_m": first.resolution_m,
+        "grid_size": [first.width, first.height],
+        "bounds_4326": [round(v, 6) for v in first.bounds_4326],
+        "hillshade": {
+            "azimuth_deg": hillshade_azimuth_deg,
+            "altitude_deg": hillshade_altitude_deg,
+            "z_factor": hillshade_z_factor,
+        },
+        "layers": [layer.as_dict() for layer in layers],
+        "note": (
+            "Tile templates are relative to this origin and are served by TiTiler "
+            "through /tiles/. They need the tiles service running: "
+            "`docker compose up -d titiler`."
+        ),
+    }
+
+
+@router.post(
+    "/terrain/contours",
+    summary="Generate contour lines from a DEM at any interval (M2-5, M2-6)",
+    description=(
+        "Traces contours through the DEM behind a `dem_id` and returns them as "
+        "GeoJSON, simplified and with every Nth line marked as an index "
+        "contour.\n\n"
+        "The mirror image of the upload path: that turns contour lines into a "
+        "grid, this turns the grid back into lines -- at whatever interval is "
+        "asked for, not only the one the file happened to use. Regenerating the "
+        "input interval is also a check on the interpolation, and the golden "
+        "test does exactly that.\n\n"
+        "Marching squares rather than the `gdal_contour` CLI (HLD Decision 7), "
+        "so there is no system GDAL binary to depend on."
+    ),
+)
+async def terrain_contours(
+    dem_id: Annotated[str, Form(description="From /analyzeContour or /terrain/contour-map.")],
+    interval_m: Annotated[
+        float,
+        Form(gt=0, le=500, description="Vertical spacing between contours, in metres."),
+    ] = 1.0,
+    index_every: Annotated[
+        int,
+        Form(
+            ge=1,
+            le=50,
+            description=(
+                "Mark every Nth line as an index contour. Five is the convention "
+                "on Indian topo sheets; the eye counts thick lines and "
+                "interpolates between them."
+            ),
+        ),
+    ] = contours.DEFAULT_INDEX_EVERY,
+    simplify: Annotated[
+        bool,
+        Form(
+            description=(
+                "Douglas-Peucker at a third of a cell. Marching squares emits a "
+                "vertex per cell crossing -- tens of thousands per level -- which "
+                "no browser will draw."
+            )
+        ),
+    ] = True,
+) -> Any:
+    entry = _PARSED_CACHE.get(dem_id)
+    if entry is None:
+        raise NotFoundProblem(
+            detail=(
+                f"no parsed contour map with id {dem_id!r}. Upload one via "
+                "POST /api/v1/terrain/contour-map first; parsed maps are held in "
+                "memory and do not survive a restart."
+            ),
+            dem_id=dem_id,
+        )
+
+    dem = entry["dem"]
+
+    def _generate() -> Any:
+        return contours.generate(
+            dem.elevation,
+            transform=dem.transform,
+            epsg=dem.epsg,
+            cell_size_m=dem.cell_size_m,
+            interval_m=interval_m,
+            index_every=index_every,
+            simplify=simplify,
+        )
+
+    try:
+        generated = await run_in_threadpool(_generate)
+    except contours.ContourGenerationError as exc:
+        # 422, not 400: the request is well-formed and the answer is that this
+        # surface cannot carry these contours.
+        raise UnanswerableProblem(detail=str(exc)) from exc
+
+    return {
+        "dem_id": dem_id,
+        "generation": generated.report(),
+        "contours": contour_lines_to_geojson(generated.lines, generated.epsg),
     }
 
 

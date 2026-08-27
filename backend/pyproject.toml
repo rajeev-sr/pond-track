@@ -2,12 +2,13 @@
 name = "contour-backend"
 version = "0.1.0"
 description = "AI-based Village Pond Planning System - backend"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
-extend-exclude = ["alembic/versions"]
+target-version = "py312"
+# _contour_example.py is a generated data literal, not hand-written code.
+extend-exclude = ["alembic/versions", "app/schemas/_contour_example.py"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "SIM", "RUF", "ARG", "PTH"]
@@ -27,12 +28,17 @@ ignore = [
 
 [tool.black]
 line-length = 100
-target-version = ["py311"]
-extend-exclude = "alembic/versions"
+target-version = ["py312"]
+extend-exclude = "alembic/versions|app/schemas/_contour_example.py"
 
 [tool.mypy]
-python_version = "3.11"
+# 3.12 matches what actually runs: python:3.12-slim in the container and 3.12
+# locally. Declaring 3.11 made mypy reject 3.12-only syntax inside installed
+# third-party packages (skimage -> tifffile).
+python_version = "3.12"
 plugins = ["pydantic.mypy"]
+# Third-party stubs are not our contract; check our own code, not theirs.
+follow_imports = "silent"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
@@ -40,7 +46,7 @@ no_implicit_optional = true
 warn_redundant_casts = true
 warn_unused_ignores = false
 ignore_missing_imports = true
-exclude = ["alembic/", "app/tests/"]
+exclude = ["alembic/", "app/tests/", "app/schemas/_contour_example.py"]
 
 [[tool.mypy.overrides]]
 # The domain layer is where correctness matters most - strict here.
@@ -57,6 +63,7 @@ markers = [
   "integration: needs a live database or redis",
   "network: hits an external provider (skipped in CI)",
   "slow: takes more than a few seconds",
+  "e2e: drives a real browser against the running compose stack",
 ]
 filterwarnings = ["ignore::DeprecationWarning:pysheds.*"]
 

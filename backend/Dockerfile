@@ -28,6 +28,12 @@ RUN pip install -r requirements-dev.txt
 COPY . /srv/
 ENV PYTHONPATH=/srv
 EXPOSE 8000
+# The dev stage gets the same probe as prod, so `docker compose ps` reports a
+# real readiness state and other services can wait on `service_healthy` rather
+# than on the container merely having started. 127.0.0.1, not localhost: uvicorn
+# binds IPv4 and `localhost` resolves to ::1 first inside the container.
+HEALTHCHECK --interval=10s --timeout=5s --start-period=15s --retries=5 \
+    CMD curl -fsS http://127.0.0.1:8000/api/v1/health || exit 1
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
 
 FROM base AS prod
@@ -37,5 +43,5 @@ RUN useradd --create-home --uid 10001 contour && chown -R contour /srv
 USER contour
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD curl -fsS http://localhost:8000/api/v1/health || exit 1
+    CMD curl -fsS http://127.0.0.1:8000/api/v1/health || exit 1
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
