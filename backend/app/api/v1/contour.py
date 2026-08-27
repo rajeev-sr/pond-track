@@ -31,7 +31,7 @@ from app.providers.elevation.contour_kml import (
 )
 from app.schemas.contour import ContourAnalysisResponse, ContourMapUploadResponse
 from app.services import conditioning as conditioning_service
-from app.services import contours, derivatives, raster, siting, streams
+from app.services import contours, derivatives, land, raster, siting, streams
 from app.services import hydrology as hyd
 from app.services.contour_analysis import (
     DEFAULT_SNAP_RADIUS_M,
@@ -722,6 +722,135 @@ async def hydrology_streams(
                 "distance_m": round(catchment.snap_distance_m, 1),
             },
         }
+    return body
+
+
+@router.post(
+    "/land/available",
+    summary="Land parcels a pond could actually be dug on (M5-6, FR-3)",
+    description=(
+        "Runs the available-land pipeline over the DEM behind a `dem_id` and "
+        "returns the surviving parcels as a GeoJSON FeatureCollection.\n\n"
+        "Terrain says where water collects; this says where you are allowed to "
+        "dig. The two are independent, and a tool that only models the first "
+        "will happily recommend the middle of a village.\n\n"
+        "Exclusions are buffered OSM features (buildings 50 m, roads 20 m, "
+        "existing water 100 m -- so a new tank does not duplicate an existing "
+        "one), land cover that rules the ground out outright, and slope above "
+        "`max_slope_pct`. The default 5 % is stricter than the 8 % siting uses, "
+        "because steep ground is ruled out by excavation cost long before it is "
+        "ruled out by physics.\n\n"
+        "OSM only ever *removes* land here. A building missing from OSM is not "
+        "evidence of open ground, so a village with thin OSM coverage gets an "
+        "optimistic answer rather than a wrong one -- `criteria."
+        "osm_exclusions_applied` says whether any features were found at all.\n\n"
+        "Both providers degrade rather than fail: if WorldCover or Overpass is "
+        "unavailable the parcels are still returned from what did answer, and "
+        "`unavailable` names what was lost."
+    ),
+)
+async def land_available(
+    dem_id: Annotated[str, Form(description="From /analyzeContour or /terrain/contour-map.")],
+    max_slope_pct: Annotated[
+        float,
+        Form(
+            gt=0,
+            le=45,
+            description=(
+                "Slope above which excavation cost rules the ground out. The "
+                "HLD fixes 5 % for this step."
+            ),
+        ),
+    ] = land.DEFAULT_MAX_SLOPE_PCT,
+    min_area_m2: Annotated[
+        float,
+        Form(
+            gt=0,
+            le=1_000_000,
+            description="Below this a patch is a puddle, not a pond site.",
+        ),
+    ] = land.DEFAULT_MIN_AREA_M2,
+    allow_cropland: Annotated[
+        bool,
+        Form(
+            description=(
+                "Include cropland. Off by default because it is usually "
+                "privately held, which is a tenure question this cannot answer."
+            ),
+        ),
+    ] = False,
+    use_osm: Annotated[
+        bool,
+        Form(description="Fetch OSM buildings/roads/water to subtract. Adds a few seconds."),
+    ] = True,
+) -> Any:
+    entry = _PARSED_CACHE.get(dem_id)
+    if entry is None:
+        raise NotFoundProblem(
+            detail=(
+                f"no parsed contour map with id {dem_id!r}. Upload one via "
+                "POST /api/v1/terrain/contour-map first; parsed maps are held in "
+                "memory and do not survive a restart."
+            ),
+            dem_id=dem_id,
+        )
+
+    dem = entry["dem"]
+    bounds = entry["parsed"].bounds
+    unavailable: list[dict[str, str]] = []
+
+    def _compute() -> Any:
+        from app.providers.base import ProviderUnavailableError
+        from app.providers.landcover.worldcover import fetch_landcover
+        from app.providers.vector.overpass import fetch_osm_context
+
+        cover = None
+        try:
+            cover = fetch_landcover(bounds.as_tuple(), dem.shape, dem.transform, dem.epsg)
+        except ProviderUnavailableError as exc:
+            unavailable.append(
+                {"layer": "land_cover", "provider": "ESA WorldCover", "reason": exc.detail}
+            )
+
+        osm = None
+        if use_osm:
+            try:
+                osm = fetch_osm_context(bounds.as_tuple())
+            except (ProviderUnavailableError, ValueError) as exc:
+                unavailable.append(
+                    {"layer": "osm_features", "provider": "Overpass", "reason": str(exc)}
+                )
+
+        # Buildability belongs on the ORIGINAL ground, not the conditioned
+        # surface: filling a depression reports it as 0 % slope, and those are
+        # exactly the cells being chosen between.
+        slope = hyd.slope_percent(dem.elevation, dem.cell_size_m)
+        return (
+            land.available_land(
+                dem,
+                slope_pct=slope,
+                land_cover=None if cover is None else cover.codes,
+                osm=osm,
+                max_slope_pct=max_slope_pct,
+                min_area_m2=min_area_m2,
+                allow_cropland=allow_cropland,
+            ),
+            cover,
+            osm,
+        )
+
+    result, cover, osm = await run_in_threadpool(_compute)
+
+    body: dict[str, Any] = {
+        "dem_id": dem_id,
+        "summary": result.as_dict(),
+        "parcels": result.feature_collection(),
+        "unavailable": unavailable,
+        "sources": {
+            "land_cover": None if cover is None else cover.as_dict()["source"],
+            "osm": None if osm is None else osm.as_dict(),
+        },
+    }
     return body
 
 

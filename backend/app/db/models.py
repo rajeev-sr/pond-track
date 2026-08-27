@@ -11,12 +11,13 @@ stored in a column whose name states its unit.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from geoalchemy2 import Geometry
 from sqlalchemy import (
     Boolean,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -326,4 +327,49 @@ class Stream(Base):
     threshold_ha: Mapped[float] = mapped_column(Float, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class RainfallCache(Base):
+    """One cached day of rainfall for one source's grid cell.
+
+    Keyed on the *source's grid cell*, never the coordinate that was asked for.
+    ERA5-Land is a 0.1-degree reanalysis, so every point inside one cell receives
+    the same series -- keying on exact lon/lat would store a fresh copy per query
+    and never hit, so two clicks 200 m apart would each persist 11,000 rows of
+    identical data.
+
+    Row per day rather than one blob per series, so a cache can be *extended*
+    when a later year becomes available instead of being invalidated whole.
+    """
+
+    __tablename__ = "rainfall_cache"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    source: Mapped[str] = mapped_column(String(40), nullable=False)
+    #: The source's grid cell, e.g. "21.3000,81.3000" for a 0.1-degree product.
+    cell_key: Mapped[str] = mapped_column(String(32), nullable=False)
+    #: The cell's own centre, so a cached series can be placed on a map honestly
+    #: and its distance from the query point reported.
+    cell_lat: Mapped[float] = mapped_column(Float, nullable=False)
+    cell_lon: Mapped[float] = mapped_column(Float, nullable=False)
+    observed_on: Mapped[date] = mapped_column(Date, nullable=False)
+    precipitation_mm: Mapped[float] = mapped_column(Float, nullable=False)
+    #: Nullable because which extras arrive depends on the source: POWER carries
+    #: temperature and no ET0, Open-Meteo the reverse.
+    temperature_c: Mapped[float | None] = mapped_column(Float)
+    et0_mm: Mapped[float | None] = mapped_column(Float)
+    fetched_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        # The constraint that makes this a cache rather than an append log:
+        # without it a re-fetch adds a second copy of every day and reads start
+        # double-counting rainfall, inflating every runoff figure derived from it.
+        UniqueConstraint("source", "cell_key", "observed_on", name="uq_rainfall_cache_cell_day"),
+        Index("ix_rainfall_cache_lookup", "source", "cell_key", "observed_on"),
+        # For finding stale entries when a source revises its reanalysis, which
+        # both of these do -- ERA5-Land and MERRA-2 are reprocessed periodically.
+        Index("ix_rainfall_cache_fetched_at", "fetched_at"),
     )

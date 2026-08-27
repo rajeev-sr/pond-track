@@ -80,6 +80,63 @@ def _get(url: str, params: QueryParams = None, timeout: float = DEFAULT_TIMEOUT_
         return client.get(url, params=params)
 
 
+@retry(
+    stop=stop_after_attempt(MAX_ATTEMPTS),
+    wait=wait_exponential_jitter(initial=0.5, max=4.0),
+    retry=_transient,
+    reraise=True,
+)
+def _post(
+    url: str,
+    *,
+    content: bytes | None = None,
+    form: dict[str, str] | None = None,
+    headers: dict[str, str] | None = None,
+    timeout: float = DEFAULT_TIMEOUT_S,
+) -> Any:
+    with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+        return client.post(url, content=content, data=form, headers=headers)
+
+
+def post_json(
+    provider: str,
+    url: str,
+    body: str | None = None,
+    timeout: float = DEFAULT_TIMEOUT_S,
+    *,
+    form: dict[str, str] | None = None,
+    headers: dict[str, str] | None = None,
+) -> Any:
+    """POST and parse JSON, as `get_json` but for query languages.
+
+    Overpass QL queries are far too long for a query string, so the request has
+    to carry them in the body. Pass `form` for the form-encoded case, which is
+    what Overpass requires -- a raw body earns an Apache 406 rather than a
+    useful error. The failure translation is identical, because the contract
+    above this layer does not change with the HTTP verb.
+    """
+    if (body is None) == (form is None):
+        raise ValueError("give exactly one of body or form")
+    try:
+        response = _post(
+            url,
+            content=None if body is None else body.encode("utf-8"),
+            form=form,
+            headers=headers,
+            timeout=timeout,
+        )
+    except Exception as exc:
+        raise ProviderUnavailableError(provider, f"request failed: {type(exc).__name__}") from exc
+    if response.status_code >= 400:
+        raise ProviderUnavailableError(
+            provider, f"HTTP {response.status_code} from {response.url.host}"
+        )
+    try:
+        return response.json()
+    except ValueError as exc:
+        raise ProviderUnavailableError(provider, "response was not valid JSON") from exc
+
+
 def get_json(
     provider: str,
     url: str,
