@@ -12,6 +12,7 @@ means adding one class here, not forking the pipeline.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, runtime_checkable
 
@@ -84,6 +85,33 @@ class DemGrid:
     def relief_m(self) -> float:
         finite = self.elevation[~np.isnan(self.elevation)]
         return float(finite.max() - finite.min()) if finite.size else 0.0
+
+    @property
+    def bounds_m(self) -> tuple[float, float, float, float]:
+        """(min_x, min_y, max_x, max_y) of the grid in its projected CRS."""
+        a, _b, c, _d, e, f = self.transform
+        rows, cols = self.shape
+        return (c, f + e * rows, c + a * cols, f)
+
+    def rowcol(self, x: float, y: float) -> tuple[int, int]:
+        """World (x, y) -> (row, col). Raises IndexError outside the grid."""
+        a, _b, c, _d, e, f = self.transform
+        col = int(math.floor((x - c) / a))
+        row = int(math.floor((y - f) / e))
+        rows, cols = self.shape
+        if not (0 <= row < rows and 0 <= col < cols):
+            raise IndexError(f"({x}, {y}) falls outside the grid ({rows}x{cols})")
+        return row, col
+
+    def xy(self, row: int, col: int) -> tuple[float, float]:
+        """(row, col) -> world (x, y) at the cell centre."""
+        a, _b, c, _d, e, f = self.transform
+        return (c + a * (col + 0.5), f + e * (row + 0.5))
+
+    def sample(self, x: float, y: float) -> float:
+        """Elevation at a world coordinate; NaN where there is no data."""
+        row, col = self.rowcol(x, y)
+        return float(self.elevation[row, col])
 
 
 @runtime_checkable
