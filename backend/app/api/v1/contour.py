@@ -802,6 +802,7 @@ async def land_available(
     def _compute() -> Any:
         from app.providers.base import ProviderUnavailableError
         from app.providers.landcover.worldcover import fetch_landcover
+        from app.providers.vector import osm_cache
         from app.providers.vector.overpass import fetch_osm_context
 
         cover = None
@@ -813,9 +814,14 @@ async def land_available(
             )
 
         osm = None
+        osm_cached = False
         if use_osm:
             try:
-                osm = fetch_osm_context(bounds.as_tuple())
+                osm, osm_cached = osm_cache.fetch_cached(
+                    bounds.as_tuple(),
+                    Path(get_settings().COG_STORE_PATH),
+                    fetch=fetch_osm_context,
+                )
             except (ProviderUnavailableError, ValueError) as exc:
                 unavailable.append(
                     {"layer": "osm_features", "provider": "Overpass", "reason": str(exc)}
@@ -837,9 +843,10 @@ async def land_available(
             ),
             cover,
             osm,
+            osm_cached,
         )
 
-    result, cover, osm = await run_in_threadpool(_compute)
+    result, cover, osm, osm_cached = await run_in_threadpool(_compute)
 
     body: dict[str, Any] = {
         "dem_id": dem_id,
@@ -848,7 +855,7 @@ async def land_available(
         "unavailable": unavailable,
         "sources": {
             "land_cover": None if cover is None else cover.as_dict()["source"],
-            "osm": None if osm is None else osm.as_dict(),
+            "osm": None if osm is None else {**osm.as_dict(), "from_cache": osm_cached},
         },
     }
     return body

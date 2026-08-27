@@ -373,3 +373,154 @@ class RainfallCache(Base):
         # both of these do -- ERA5-Land and MERRA-2 are reprocessed periodically.
         Index("ix_rainfall_cache_fetched_at", "fetched_at"),
     )
+
+
+class CandidateSite(Base):
+    """One ranked pond location from a siting run (M5-14).
+
+    Kept separate from `pond_designs` because the two answer different
+    questions and change independently: the site is *where*, decided by terrain
+    and land availability, and a design is *what you build there*, which depends
+    on the runoff figure and the budget and may be recomputed many times over one
+    site.
+
+    `criteria_breakdown` holds the per-criterion contributions rather than only
+    the total. A score of 72 with no breakdown is unauditable, and the whole
+    point of an AHP model is that a reader can see which criterion carried it.
+    """
+
+    __tablename__ = "candidate_sites"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    analysis_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("analyses.id", ondelete="CASCADE"), index=True
+    )
+    catchment_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("catchments.id", ondelete="SET NULL"), index=True
+    )
+
+    rank: Mapped[int] = mapped_column(Integer, nullable=False)
+    suitability_score: Mapped[float] = mapped_column(Float, nullable=False)
+    #: depression | channel_position
+    site_kind: Mapped[str | None] = mapped_column(String(24))
+
+    location: Mapped[Any] = mapped_column(
+        Geometry("POINT", srid=4326, spatial_index=True), nullable=False
+    )
+    #: The buildable patch the pond has to fit inside, when one was vectorised.
+    footprint: Mapped[Any | None] = mapped_column(
+        Geometry("MULTIPOLYGON", srid=4326, spatial_index=True)
+    )
+    usable_area_m2: Mapped[float | None] = mapped_column(Float)
+
+    mean_slope_pct: Mapped[float | None] = mapped_column(Float)
+    depression_depth_m: Mapped[float | None] = mapped_column(Float)
+    upstream_area_ha: Mapped[float | None] = mapped_column(Float)
+    dominant_land_cover: Mapped[str | None] = mapped_column(String(40))
+
+    criteria_weights: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    criteria_breakdown: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB)
+    #: full | no_soil_lulc | terrain_only -- a score is not comparable across tiers.
+    analysis_tier: Mapped[str | None] = mapped_column(String(24))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        # One rank per analysis: two sites both claiming #1 makes the ordering
+        # meaningless, and it is the ordering the caller reads.
+        UniqueConstraint("analysis_id", "rank", name="uq_candidate_sites_analysis_rank"),
+        Index("ix_candidate_sites_score", "analysis_id", "suitability_score"),
+    )
+
+
+class Runoff(Base):
+    """An SCS-CN runoff estimate for one catchment (M5-14).
+
+    Stores the *inputs* alongside the answer. A volume in cubic metres with no
+    curve number, rainfall period or antecedent-moisture assumption cannot be
+    checked or reproduced, and a stored number nobody can check is worse than no
+    stored number.
+    """
+
+    __tablename__ = "runoffs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    analysis_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("analyses.id", ondelete="CASCADE"), index=True
+    )
+    catchment_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("catchments.id", ondelete="CASCADE"), index=True
+    )
+
+    catchment_area_ha: Mapped[float] = mapped_column(Float, nullable=False)
+    composite_cn_amc2: Mapped[float | None] = mapped_column(Float)
+    hydrologic_soil_group: Mapped[str | None] = mapped_column(String(4))
+    #: The 0.2S / 0.3S choice matters: CWC and IMD practice for India is 0.3S,
+    #: and the two differ by roughly a fifth on the annual total.
+    initial_abstraction_ratio: Mapped[float | None] = mapped_column(Float)
+
+    annual_rainfall_mm: Mapped[float | None] = mapped_column(Float)
+    annual_runoff_mm: Mapped[float | None] = mapped_column(Float)
+    annual_runoff_m3: Mapped[float | None] = mapped_column(Float)
+    runoff_coefficient: Mapped[float | None] = mapped_column(Float)
+    dependable_75_runoff_m3: Mapped[float | None] = mapped_column(Float)
+    monthly_runoff_mm: Mapped[list[float] | None] = mapped_column(JSONB)
+
+    rainfall_source: Mapped[str | None] = mapped_column(String(40))
+    rainfall_period_start: Mapped[date | None] = mapped_column(Date)
+    rainfall_period_end: Mapped[date | None] = mapped_column(Date)
+    #: Inglis-DeSouza / Khosla / Barlow / Rational, for the sanity check.
+    cross_checks: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class PondDesign(Base):
+    """A sized pond for one candidate site (M5-14).
+
+    `binding_constraint` is the column this table exists for. Depth, dimensions
+    and cost are a calculator result; *which limit stopped the design growing* is
+    the planning recommendation, and it is the difference between "build a 4.5 m
+    pond" and "acquire more land, because the parcel is what is limiting you".
+    """
+
+    __tablename__ = "pond_designs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    candidate_site_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("candidate_sites.id", ondelete="CASCADE"), index=True
+    )
+    runoff_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("runoffs.id", ondelete="SET NULL"), index=True
+    )
+
+    depth_m: Mapped[float] = mapped_column(Float, nullable=False)
+    top_length_m: Mapped[float] = mapped_column(Float, nullable=False)
+    top_width_m: Mapped[float] = mapped_column(Float, nullable=False)
+    bottom_length_m: Mapped[float | None] = mapped_column(Float)
+    bottom_width_m: Mapped[float | None] = mapped_column(Float)
+    side_slope: Mapped[float | None] = mapped_column(Float)
+
+    gross_capacity_m3: Mapped[float] = mapped_column(Float, nullable=False)
+    live_storage_m3: Mapped[float | None] = mapped_column(Float)
+    dead_storage_m3: Mapped[float | None] = mapped_column(Float)
+    excavation_volume_m3: Mapped[float | None] = mapped_column(Float)
+    freeboard_m: Mapped[float | None] = mapped_column(Float)
+    spillway_width_m: Mapped[float | None] = mapped_column(Float)
+
+    estimated_cost_inr: Mapped[float | None] = mapped_column(Float)
+    #: parcel_area | practical_depth | runoff_yield | budget
+    binding_constraint: Mapped[str | None] = mapped_column(String(32), index=True)
+    #: Fraction of the catchment's yield this pond captures. In the HLD's worked
+    #: example it is 1.42 %, which is what shows the parcel is the real limit.
+    yield_capture_fraction: Mapped[float | None] = mapped_column(Float)
+    stage_storage: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB)
+
+    footprint: Mapped[Any | None] = mapped_column(
+        Geometry("POLYGON", srid=4326, spatial_index=True)
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
