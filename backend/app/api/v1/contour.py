@@ -14,7 +14,6 @@ specific reason. No domain logic lives here (HLD 2.1).
 from __future__ import annotations
 
 import math
-import uuid
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -31,7 +30,7 @@ from app.providers.elevation.contour_kml import (
 )
 from app.schemas.contour import ContourAnalysisResponse, ContourMapUploadResponse
 from app.services import conditioning as conditioning_service
-from app.services import contours, derivatives, land, raster, siting, streams
+from app.services import contours, dem_cache, derivatives, land, raster, siting, streams
 from app.services import hydrology as hyd
 from app.services.contour_analysis import (
     DEFAULT_SNAP_RADIUS_M,
@@ -52,12 +51,10 @@ from app.services.interpolate import MAX_CELL_M, MIN_CELL_M, contours_to_dem
 router = APIRouter(tags=["contour"])
 log = get_logger("contour")
 
-#: Parsed uploads, keyed by dem_id, so the two-step flow can retrieve contours
-#: without re-uploading. In-process and bounded: this is a local single-node
-#: deployment (see the project's local-only decision), and M6 replaces it with
-#: the Redis/PostGIS-backed store the async job architecture already specifies.
-_PARSED_CACHE: dict[str, Any] = {}
-_CACHE_LIMIT = 16
+#: Parsed uploads live in `services.dem_cache` now, because the async job path
+#: has to register them too -- a service cannot import this module without
+#: inverting the layering, and while the registry lived here an analysis run as a
+#: job came back with no `dem_id` at all.
 
 ACCEPTED_SUFFIXES = (".kml", ".kmz", ".xml")
 
@@ -128,11 +125,7 @@ def _as_unanswerable(exc: ContourParseError, filename: str) -> UnanswerableProbl
 
 
 def _remember(parsed: Any, dem: Any, report: Any) -> str:
-    dem_id = uuid.uuid4().hex[:16]
-    if len(_PARSED_CACHE) >= _CACHE_LIMIT:
-        _PARSED_CACHE.pop(next(iter(_PARSED_CACHE)))
-    _PARSED_CACHE[dem_id] = {"parsed": parsed, "dem": dem, "report": report}
-    return dem_id
+    return dem_cache.remember(parsed, dem, report)
 
 
 #: Declared as explicit `Form(...)` fields rather than a Pydantic model bound with
@@ -251,8 +244,8 @@ async def _run(file: UploadFile, opts: ContourAnalysisOptions) -> Any:
     # second time. The analysis already holds the grid; re-parsing 6 MB of KML to
     # get back to it would be pure waste.
     body["dem_id"] = _remember(result.parsed, result.dem, result.interpolation)
-    if opts.include_contours:
-        body["contours"] = contours_to_geojson(result.parsed.lines)
+    # Contours are attached by `ContourAnalysis.as_dict()` now, so both this
+    # endpoint and the async job path get them from one place.
     log.info(
         "contour_analysis_complete",
         analysis_id=result.analysis_id,
@@ -385,7 +378,7 @@ async def terrain_derivatives(
         ),
     ] = raster.DEFAULT_Z_FACTOR,
 ) -> Any:
-    entry = _PARSED_CACHE.get(dem_id)
+    entry = dem_cache.get(dem_id)
     if entry is None:
         raise NotFoundProblem(
             detail=(
@@ -508,7 +501,7 @@ async def hydrology_catchment(
         ),
     ] = "auto",
 ) -> Any:
-    entry = _PARSED_CACHE.get(dem_id)
+    entry = dem_cache.get(dem_id)
     if entry is None:
         raise NotFoundProblem(
             detail=(
@@ -651,7 +644,7 @@ async def hydrology_streams(
         ),
     ] = DEFAULT_SNAP_RADIUS_M,
 ) -> Any:
-    entry = _PARSED_CACHE.get(dem_id)
+    entry = dem_cache.get(dem_id)
     if entry is None:
         raise NotFoundProblem(
             detail=(
@@ -784,7 +777,7 @@ async def land_available(
         Form(description="Fetch OSM buildings/roads/water to subtract. Adds a few seconds."),
     ] = True,
 ) -> Any:
-    entry = _PARSED_CACHE.get(dem_id)
+    entry = dem_cache.get(dem_id)
     if entry is None:
         raise NotFoundProblem(
             detail=(
@@ -924,7 +917,7 @@ async def terrain_contours(
         ),
     ] = True,
 ) -> Any:
-    entry = _PARSED_CACHE.get(dem_id)
+    entry = dem_cache.get(dem_id)
     if entry is None:
         raise NotFoundProblem(
             detail=(
@@ -980,7 +973,7 @@ async def get_contours(
         int | None, Query(ge=1, description="Return only the lowest N contour lines.")
     ] = None,
 ) -> Any:
-    entry = _PARSED_CACHE.get(dem_id)
+    entry = dem_cache.get(dem_id)
     if entry is None:
         raise NotFoundProblem(
             f"no parsed contour map with id {dem_id!r}. Upload one via "

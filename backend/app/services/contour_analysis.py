@@ -17,7 +17,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Protocol
 
 import numpy as np
 import numpy.typing as npt
@@ -30,7 +30,12 @@ from app.services import indian_runoff, siting
 from app.services import pond as pond_design
 from app.services import runoff as runoff_service
 from app.services.enrichment import Enrichment, fetch_enrichment
-from app.services.geometry import bbox_geojson, mask_to_geojson, point_geojson
+from app.services.geometry import (
+    bbox_geojson,
+    contours_to_geojson,
+    mask_to_geojson,
+    point_geojson,
+)
 from app.services.interpolate import InterpolationReport, contours_to_dem
 
 #: How far a pour point may be nudged onto the drainage line. Expressed in metres
@@ -63,6 +68,10 @@ class ContourAnalysisOptions:
     #: Wall-clock budget for the enrichment phase; layers that miss it degrade
     #: the tier rather than delaying the response.
     enrichment_budget_s: float = 20.0
+    #: A caller's own AHP weights, replacing the shipped vector. Restricted to
+    #: the criteria actually available and renormalised, so the score stays
+    #: comparable to a default run. `POST /suitability/weights/ahp` derives one.
+    weights_override: dict[str, float] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -107,7 +116,7 @@ class ContourAnalysis:
     def as_dict(self) -> dict[str, Any]:
         b = self.parsed.bounds
         recommended = self.sites[0] if self.sites else None
-        return {
+        body: dict[str, Any] = {
             "analysis_id": self.analysis_id,
             "generated_at": self.generated_at,
             "elapsed_s": round(self.elapsed_s, 3),
@@ -144,18 +153,45 @@ class ContourAnalysis:
             "candidate_sites": self.sites,
             "warnings": self.warnings,
         }
+        # Attached here rather than by the endpoint. It used to be the caller's
+        # job, and the async path did not know to do it -- so an analysis run as
+        # a job came back with no contours at all, which emptied the map's
+        # contour layer and the GeoJSON export with it. `as_dict()` owns the
+        # whole document and the deciding option lives on the analysis, so this
+        # is the one place it cannot be forgotten.
+        if self.options.include_contours:
+            body["contours"] = contours_to_geojson(self.parsed.lines)
+        return body
+
+
+class StageReporter(Protocol):
+    """What `analyze_contour_map` needs in order to report progress.
+
+    Deliberately the subset of `services.jobs.JobProgress` that matters here, so
+    a job can be passed straight in while the pipeline keeps no knowledge of job
+    state, Celery or Redis.
+    """
+
+    def start_step(self, name: str) -> None: ...
+    def finish_step(self, name: str) -> None: ...
+    def fail_step(self, name: str, reason: str) -> None: ...
 
 
 def analyze_contour_map(
     data: bytes,
     filename: str | None = None,
     options: ContourAnalysisOptions | None = None,
+    reporter: StageReporter | None = None,
 ) -> ContourAnalysis:
     """Run the full pipeline on an uploaded contour map.
 
     Raises `ContourParseError` (with a specific reason) on unusable input; every
     other failure mode is reported as a warning on an otherwise valid result, so
     a partially-degraded analysis still answers the question.
+
+    `reporter`, when given, is told which stage is starting and finishing. It is
+    optional so the synchronous endpoint stays exactly as it was -- the async job
+    path is the only caller that has anywhere to report to.
     """
     opts = options or ContourAnalysisOptions()
     t_total = time.perf_counter()
@@ -163,8 +199,19 @@ def analyze_contour_map(
 
     def stage(name: str, fn: Any) -> Any:
         t = time.perf_counter()
-        out = fn()
+        if reporter is not None:
+            reporter.start_step(name)
+        try:
+            out = fn()
+        except Exception as exc:
+            # The reporter is told before the exception propagates, so a failed
+            # job records *which* stage died rather than only that it did.
+            if reporter is not None:
+                reporter.fail_step(name, f"{type(exc).__name__}: {exc}")
+            raise
         timings[name] = time.perf_counter() - t
+        if reporter is not None:
+            reporter.finish_step(name)
         return out
 
     parsed = stage("parse", lambda: parse_contour_file(data, filename))
@@ -198,6 +245,7 @@ def analyze_contour_map(
             max_sites=opts.max_sites,
             max_slope_pct=opts.max_slope_pct,
             min_upstream_ha=opts.min_upstream_ha,
+            weights_override=opts.weights_override,
             score_threshold=opts.score_threshold,
             min_separation_m=opts.min_separation_m,
             min_depression_depth_m=opts.min_depression_depth_m,

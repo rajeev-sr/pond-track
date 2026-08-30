@@ -172,11 +172,34 @@ def fetch_enrichment(
     result = Enrichment()
     t0 = time.perf_counter()
 
+    # Both go through the disk cache, which is also what gives `DEMO_MODE` its
+    # meaning: with it set, a cache miss raises rather than reaching the network,
+    # so a demo is deterministic and works unplugged. A miss then degrades the
+    # tier through the same path as a provider outage, which is already handled.
+    from pathlib import Path
+
+    from app.config import get_settings
+    from app.services import provider_cache
+
+    settings = get_settings()
+    cache_store = Path(settings.COG_STORE_PATH)
+    demo = bool(getattr(settings, "DEMO_MODE", False))
+
     def _soil() -> SoilProfile:
-        return fetch_soil_profile(lon, lat)
+        return provider_cache.cached_soil(
+            lon, lat, cache_store, demo_mode=demo, fetch=fetch_soil_profile
+        )
 
     def _cover() -> LandCover:
-        return fetch_landcover(bounds.as_tuple(), dem.shape, dem.transform, dem.epsg)
+        return provider_cache.cached_landcover(
+            bounds.as_tuple(),
+            dem.shape,
+            dem.transform,
+            dem.epsg,
+            cache_store,
+            demo_mode=demo,
+            fetch=fetch_landcover,
+        )
 
     def _rain() -> RainfallEnsemble:
         # Both sources at once. Either alone is enough to produce a runoff
