@@ -20,11 +20,6 @@ export function volume(cubicMetres: number): string {
     : `${num(cubicMetres)} m³`;
 }
 
-export function rupees(value: number): string {
-  // Indian numbering: ₹12,04,810 rather than ₹1,204,810.
-  return `₹${new Intl.NumberFormat("en-IN", { maximumFractionDigits: 0 }).format(value)}`;
-}
-
 export function distance(metres: number): string {
   return metres >= 1000 ? `${num(metres / 1000, 2)} km` : `${num(metres)} m`;
 }

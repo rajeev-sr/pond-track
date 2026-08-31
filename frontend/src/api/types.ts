@@ -87,9 +87,12 @@ export interface CandidateSite {
   runoff?: {
     available: boolean;
     reason?: string;
+    /** As returned: "SCS-CN, daily, Ia = 0.3 S". Named in the response because
+     *  the initial-abstraction ratio is a choice, not a constant. */
+    method?: string;
     curve_number?: { composite_cn_amc2: number; hydrologic_soil_group: string };
-    annual_mean?: { runoff_volume_m3: number; runoff_coefficient: number };
-    design_75_percent_dependable?: { runoff_volume_m3: number };
+    annual_mean?: { runoff_depth_mm: number; runoff_volume_m3: number; runoff_coefficient: number };
+    design_75_percent_dependable?: { runoff_depth_mm: number; runoff_volume_m3: number };
   };
   pond?: {
     available: boolean;
@@ -104,10 +107,34 @@ export interface CandidateSite {
       top_width_m: number;
       gross_capacity_m3: number;
       live_storage_m3: number;
+      /** The API still returns this; the UI deliberately does not show it.
+       *  The question this tool answers is where a pond should go and how big it
+       *  can be — a cost figure derived from a unit rate invites a budget
+       *  conversation the terrain cannot support. Declared so the field is
+       *  accounted for rather than silently dropped from the contract. */
       estimated_cost_inr: number;
     };
     binding_constraint?: string;
     footprint?: { usable_buildable_area_ha: number };
+    /** Monthly inflow less evaporation and seepage. Declared because the brief
+     *  and the yield pane both report reliability, and it was previously read
+     *  off an untyped response. */
+    water_balance?: {
+      available: boolean;
+      months_with_water?: number;
+      reliability_pct?: number;
+      peak_storage_m3?: number;
+      peak_fill_pct?: number;
+      dry_month?: string | null;
+      annual_losses_m3?: number;
+      months?: {
+        month: number;
+        inflow_m3?: number;
+        evaporation_m3?: number;
+        seepage_m3?: number;
+        storage_m3?: number;
+      }[];
+    };
   };
 }
 
@@ -248,10 +275,25 @@ export interface ContourAnalysis {
     analysis_tier: AnalysisTier;
     criteria_weights: Record<string, number>;
     feasible_cells: number;
+    /** The siting veto: ground ruled out before any site was scored, and how
+     *  much of that protection was actually available. Declared now because the
+     *  workspace reports it in two places. */
+    exclusions?: {
+      excluded_cells: number;
+      removed_by: Record<string, number>;
+      sources: string[];
+      confidence: "high" | "partial" | "terrain-only";
+      notes: string[];
+    };
   };
   environment: Environment;
   recommended_site: CandidateSite | null;
   candidate_sites: CandidateSite[];
+  /** Deterministic, template-built prose: a summary plus the caveats that apply
+   *  to this run. Declared because the caveats pane renders them. */
+  explanation?: {
+    recommended?: { summary: string; sentences: string[]; caveats: string[] };
+  };
   contours?: GeoJSON.FeatureCollection;
   /** Handle on the interpolated DEM, for requesting terrain tiles. */
   dem_id?: string;
