@@ -8,6 +8,7 @@ a skip, not a failure -- `pytest` on a bare checkout must stay green.
 
 from __future__ import annotations
 
+import os
 import shutil
 import urllib.error
 import urllib.request
@@ -15,7 +16,14 @@ from pathlib import Path
 
 import pytest
 
-FRONTEND_URL = "http://localhost:8080"
+#: Where the app is served. Defaults to the nginx container; override with
+#: CONTOUR_FRONTEND_URL to point at `make ui-dev` on :5173 instead.
+#:
+#: Worth having rather than a constant: the container image can only be rebuilt
+#: when the registry is reachable, and a stale image silently tests yesterday's
+#: bundle — the suite passes and the change under test was never loaded. The dev
+#: server compiles from source, so it is the honest target while iterating.
+FRONTEND_URL = os.environ.get("CONTOUR_FRONTEND_URL", "http://localhost:8080").rstrip("/")
 REPO_ROOT = Path(__file__).resolve().parents[4]
 CHROME_NAMES = ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser")
 

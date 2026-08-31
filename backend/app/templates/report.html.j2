@@ -1,0 +1,257 @@
+{#
+  Village pond siting report (M7-1).
+
+  Written for someone who has to act on it or defend it -- a block engineer, a
+  panchayat secretary, an examiner -- not for someone who already knows how the
+  tool works. So every number carries its unit, every figure carries its source,
+  and the limitations section is not an appendix: a recommendation whose caveats
+  are hidden is worse than one that admits what it does not know.
+#}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Pond siting report — {{ site_label }}</title>
+<style>
+  @page {
+    size: A4;
+    margin: 18mm 16mm 20mm 16mm;
+    @bottom-left { content: "{{ generated_on }} · Contour"; font-size: 7.5pt; color: #777; }
+    @bottom-right { content: "Page " counter(page) " of " counter(pages); font-size: 7.5pt; color: #777; }
+  }
+  body { font-family: "DejaVu Sans", sans-serif; font-size: 9.5pt; line-height: 1.45; color: #111; }
+  h1 { font-size: 18pt; margin: 0 0 2mm; }
+  h2 { font-size: 12pt; margin: 7mm 0 2mm; border-bottom: 0.4pt solid #ccc; padding-bottom: 1mm; }
+  h3 { font-size: 10pt; margin: 4mm 0 1mm; }
+  p  { margin: 0 0 2.5mm; }
+  .lede { color: #444; margin-bottom: 4mm; }
+  .muted { color: #666; }
+  .small { font-size: 8pt; }
+
+  /* The headline recommendation. A reader who reads nothing else reads this. */
+  .headline { border: 0.6pt solid #bbb; border-left: 2.5pt solid #1f6f8b;
+              padding: 3mm 4mm; margin: 0 0 5mm; background: #f7fafb; }
+  .headline .figure { font-size: 15pt; font-weight: bold; }
+  .binding { background: #fff8e6; border-left: 2.5pt solid #d29200;
+             padding: 2.5mm 3.5mm; margin: 3mm 0; }
+
+  table { width: 100%; border-collapse: collapse; margin: 2mm 0 4mm; font-size: 9pt; }
+  th, td { text-align: left; padding: 1.4mm 2mm; border-bottom: 0.3pt solid #ddd; }
+  th { color: #555; font-weight: normal; }
+  td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; }
+  tr.total td { font-weight: bold; border-top: 0.6pt solid #999; }
+
+  figure { margin: 3mm 0 5mm; page-break-inside: avoid; }
+  figure img { width: 100%; }
+  figcaption { font-size: 8pt; color: #666; margin-top: 1.5mm; }
+
+  .caveat { border: 0.4pt solid #ddd; padding: 3mm; margin: 3mm 0; }
+  .caveat li { margin-bottom: 1.5mm; }
+  .tier { display: inline-block; padding: 0.6mm 2mm; border-radius: 1mm;
+          font-size: 8pt; background: #eef3f6; color: #24506b; }
+  .avoid-break { page-break-inside: avoid; }
+</style>
+</head>
+<body>
+
+<h1>Village pond siting report</h1>
+<p class="lede">
+  {{ site_label }} · analysed {{ generated_on }} ·
+  <span class="tier">{{ tier_label }}</span>
+</p>
+
+{% if partial_warnings %}
+<div class="binding">
+  <strong>Partial analysis.</strong> The terrain results below are complete, but
+  an optional data layer was unavailable:
+  <ul class="small" style="margin:1.5mm 0 0">
+    {% for warning in partial_warnings %}<li>{{ warning }}</li>{% endfor %}
+  </ul>
+</div>
+{% endif %}
+
+{% if pond %}
+<div class="headline">
+  <div class="small muted">Recommended pond — site #{{ recommended.rank }} of
+    {{ site_count }} assessed, scoring {{ recommended.suitability_score }}/100</div>
+  <div class="figure">{{ pond.depth_m }} m deep · {{ pond.top_length_m|round(0)|int }} ×
+    {{ pond.top_width_m|round(0)|int }} m · {{ "{:,}".format(pond.gross_capacity_m3|round(0)|int) }} m³</div>
+  <div class="small">Indicative cost {{ cost_inr }} at
+    ₹{{ excavation_rate }}/m³ excavation. Location
+    {{ "%.5f"|format(recommended.location.lat) }} N,
+    {{ "%.5f"|format(recommended.location.lon) }} E.</div>
+</div>
+
+{% if binding_constraint %}
+<div class="binding">
+  <strong>What limits this pond: {{ binding_constraint }}.</strong>
+  {{ binding_explanation }}
+</div>
+{% endif %}
+{% else %}
+<div class="binding">
+  <strong>No pond was sized.</strong> {{ no_pond_reason }}
+</div>
+{% endif %}
+
+<h2>Where it goes</h2>
+<figure>
+  <img src="data:image/png;base64,{{ site_map_b64 }}" alt="Analysis map">
+  <figcaption>
+    Candidate sites, the catchment draining to each, and the surveyed extent.
+    {% if has_contours %}Contours are the uploaded sheet's own lines.{% endif %}
+    No basemap: the figure is drawn from the analysis so the report can be
+    produced with no network.
+  </figcaption>
+</figure>
+
+<h2>The catchment that feeds it</h2>
+<table class="avoid-break">
+  <tr><th>Contributing area</th><td class="n">{{ catchment.area_ha }} ha
+      ({{ catchment.area_km2 }} km²)</td></tr>
+  <tr><th>Relief</th><td class="n">{{ catchment.relief_m }} m</td></tr>
+  <tr><th>Longest flow path</th><td class="n">{{ catchment.longest_flow_path_m }} m</td></tr>
+  <tr><th>Time of concentration (Kirpich)</th>
+      <td class="n">{{ catchment.time_of_concentration_min }} min</td></tr>
+  <tr><th>Mean slope</th><td class="n">{{ catchment.mean_slope_pct }} %</td></tr>
+</table>
+{% if touches_edge %}
+<p class="small muted">
+  The catchment touches the edge of the surveyed sheet, so the contributing area
+  above is a <strong>lower bound</strong> — part of the real catchment lies
+  outside the map and cannot be measured from it.
+</p>
+{% endif %}
+
+{% if rainfall %}
+<h2>Water available</h2>
+<figure>
+  <img src="data:image/png;base64,{{ rainfall_b64 }}" alt="Monthly rainfall">
+  <figcaption>
+    Mean monthly rainfall, {{ rainfall.period }}. Monsoon months
+    ({{ rainfall.monsoon_months|join(", ") }}) carry
+    {{ rainfall.monsoon_share_pct }} % of the annual total. Source:
+    {{ rainfall.source }}.
+  </figcaption>
+</figure>
+
+<table class="avoid-break">
+  <tr><th>Mean annual rainfall</th><td class="n">{{ rainfall.mean_mm }} mm</td></tr>
+  <tr><th>75 % dependable rainfall</th><td class="n">{{ rainfall.dependable_75_mm }} mm</td></tr>
+  <tr><th>Coefficient of variation</th><td class="n">{{ rainfall.cv }}</td></tr>
+  {% if runoff %}
+  <tr><th>Composite curve number (AMC II)</th><td class="n">{{ runoff.cn }}</td></tr>
+  <tr><th>Hydrologic soil group</th><td class="n">{{ runoff.hsg }}</td></tr>
+  <tr><th>Annual runoff</th>
+      <td class="n">{{ "{:,}".format(runoff.annual_m3|round(0)|int) }} m³
+      (C = {{ runoff.coefficient }})</td></tr>
+  <tr class="total"><td>Design yield at 75 % dependability</td>
+      <td class="n">{{ "{:,}".format(runoff.dependable_m3|round(0)|int) }} m³</td></tr>
+  {% endif %}
+</table>
+
+{% if runoff and pond %}
+<p>
+  The pond holds {{ capture_pct }} % of the design-year yield. A pond is not
+  meant to capture all of it — the rest passes downstream, and sizing for the
+  whole yield would mean a structure the parcel cannot hold and a spillway
+  carrying most of the flow anyway.
+</p>
+{% endif %}
+{% endif %}
+
+<h2>The other sites assessed</h2>
+<table>
+  <thead>
+    <tr><th>#</th><th>Score</th><th>Kind</th><th class="n">Catchment</th>
+        <th class="n">Capacity</th><th>Limited by</th></tr>
+  </thead>
+  <tbody>
+    {% for row in site_rows %}
+    <tr>
+      <td>{{ row.rank }}</td><td class="n">{{ row.score }}</td><td>{{ row.kind }}</td>
+      <td class="n">{{ row.area_ha }} ha</td><td class="n">{{ row.capacity }}</td>
+      <td class="small">{{ row.binding }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h2>How the recommendation was reached</h2>
+<p>
+  Sites are scored against {{ criteria_count }} criteria weighted by the
+  Analytic Hierarchy Process, then clustered so that two recommendations cannot
+  describe the same structure. The weights below are the ones this analysis used;
+  they are renormalised over the criteria the available data supports, so a
+  missing layer redistributes its weight rather than silently scoring zero.
+</p>
+<table class="avoid-break">
+  <thead><tr><th>Criterion</th><th class="n">Weight</th>
+             <th class="n">This site</th><th class="n">Contribution</th></tr></thead>
+  <tbody>
+    {% for row in criteria_rows %}
+    <tr><td>{{ row.name }}</td><td class="n">{{ row.weight }}</td>
+        <td class="n">{{ row.normalised }}</td><td class="n">{{ row.contribution }}</td></tr>
+    {% endfor %}
+    <tr class="total"><td>Score</td><td class="n"></td><td class="n"></td>
+        <td class="n">{{ recommended.suitability_score }}/100</td></tr>
+  </tbody>
+</table>
+<p class="small muted">
+  The contributions sum to the score, so the ranking can be checked rather than
+  taken on trust. The weight vector's own internal consistency is auditable at
+  <code>GET /api/v1/suitability/weights</code> (Consistency Ratio
+  {{ consistency_ratio }}, against Saaty's 0.10 threshold).
+</p>
+
+<h2>Assumptions and limitations</h2>
+<div class="caveat">
+<ul>
+  <li><strong>The terrain is interpolated from contour lines</strong>, not
+      surveyed directly. Between two contours the surface is inferred, so a
+      hollow smaller than the contour interval ({{ contour_interval }} m here)
+      cannot appear in it at all.</li>
+  <li><strong>The pond footprint has no orientation.</strong> The design fixes
+      plan dimensions and depth; nothing in the model chooses a bearing, so the
+      rectangle on the map shows size and position only.</li>
+  <li><strong>Land tenure is not modelled.</strong> No open dataset gives
+      village-level ownership, so a site that is physically ideal may be
+      privately held. This has to be checked on the ground.</li>
+  {% if osm_caveat %}
+  <li><strong>Existing structures come from OpenStreetMap</strong>, whose
+      coverage varies by village. A building absent from OSM is not evidence of
+      open ground, so exclusions are a lower bound.</li>
+  {% endif %}
+  {% if tier != "full" %}
+  <li><strong>This analysis ran at tier "{{ tier }}".</strong>
+      {{ tier_meaning }} Scores are not comparable with a full-tier analysis,
+      because a different set of criteria produced them.</li>
+  {% endif %}
+  <li><strong>Costs are indicative.</strong> A single excavation rate is applied
+      to the whole volume; it carries no lead-in, no lining, no land
+      acquisition, and no local rate schedule.</li>
+  <li><strong>Runoff is a design estimate, not a gauged measurement.</strong>
+      SCS-CN with an initial abstraction of 0.3S, which is CWC and IMD practice
+      for India rather than the 0.2S of the original American method.</li>
+</ul>
+</div>
+
+<h2>Data sources</h2>
+<table>
+  <thead><tr><th>Layer</th><th>Source</th><th>Licence</th></tr></thead>
+  <tbody>
+    {% for row in source_rows %}
+    <tr><td>{{ row.layer }}</td><td>{{ row.provider }}</td>
+        <td class="small">{{ row.licence }}</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<p class="small muted">
+  Analysis {{ analysis_id }} · generated by Contour, an open-data village pond
+  planning tool. Every figure in this report is derived from the uploaded contour
+  map and the sources above; none is a placeholder.
+</p>
+
+</body>
+</html>

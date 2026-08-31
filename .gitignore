@@ -19,6 +19,8 @@
 .env
 .env.local
 .env.*.local
+.env.bak*
+.env.*.bak
 !.env.example
 *.pem
 *.key
@@ -71,11 +73,23 @@ npm-debug.log*
 yarn-error.log*
 .pnpm-store/
 
-.github
-docs
-scripts
-backend/app/tests
-backend/app/templates
+# NOTE: `.github`, `docs`, `scripts`, `backend/app/tests` and
+# `backend/app/templates` were listed here as blanket excludes. They are gone,
+# deliberately -- they contradicted this file's own header and, worse, three of
+# them are needed at run time, not just for grading:
+#
+#   backend/app/templates/report.html.j2  loaded by app/services/report.py --
+#                                         without it /reports raises
+#                                         TemplateNotFound at render time
+#   backend/scripts/                      `scripts` matched at ANY depth, so this
+#                                         went too: `make seed` and `make
+#                                         demo-warm` run `python -m
+#                                         scripts.seed_villages` / `.warm_demo`
+#                                         inside the container
+#   scripts/demo_contour.sh               `make demo`
+#
+# Do not re-add them.
+
 # ── Generated geospatial data ────────────────────────────────────────────────
 # DEM tiles, derivatives and COGs are cached artefacts, re-downloadable or
 # recomputable. Negations keep the door open for a deliberately committed test

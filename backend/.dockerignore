@@ -1,0 +1,27 @@
+# Keep the build context small and deterministic. The Dockerfile ends with
+# `COPY . /srv/`, so without this every cache in the backend tree is uploaded to
+# the daemon and baked into the image -- .mypy_cache alone is ~140 MB, which is
+# larger than the rest of the image put together and invalidates the COPY layer
+# on every type-check run.
+#
+# Mirrors the repository .gitignore for the same paths. Nothing listed here is
+# needed at run time; the ones that ARE (app/templates, scripts/) are
+# deliberately absent from this file.
+__pycache__/
+*.py[cod]
+*.so
+
+.venv/
+venv/
+
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+*.log
+.DS_Store
