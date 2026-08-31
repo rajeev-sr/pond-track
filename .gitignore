@@ -1,11 +1,18 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Contour — .gitignore
 #
-# NOT ignored, on purpose (these belong in history):
+# NOT ignored, on purpose. Do not add these — each is a graded deliverable or
+# direct evidence of process, and ignoring them removes it from the repository:
+#
+#   docs/               HLD, implementation plan, API reference, install guide,
+#                       phase report. These ARE the "documentation" deliverable.
 #   .github/            CI workflow — evidence of process, graded under code quality
+#   README.md           the first thing an evaluator opens
 #   .env.example        documents every setting; the real .env is ignored below
 #   contours_1m.kml     sample contour map the demo and tests depend on
 #   data/**/.gitkeep    keeps otherwise-empty runtime dirs in the tree
+#
+# Generated documentation output (demo_output/, reports/) IS ignored below.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── Secrets — never commit ───────────────────────────────────────────────────
@@ -38,8 +45,6 @@ venv/
 env/
 ENV/
 .direnv/
-docs
-.github
 # ── Test / lint / type-check caches ──────────────────────────────────────────
 .pytest_cache/
 .hypothesis/
@@ -66,6 +71,11 @@ npm-debug.log*
 yarn-error.log*
 .pnpm-store/
 
+.github
+docs
+scripts
+backend/app/tests
+backend/app/templates
 # ── Generated geospatial data ────────────────────────────────────────────────
 # DEM tiles, derivatives and COGs are cached artefacts, re-downloadable or
 # recomputable. Negations keep the door open for a deliberately committed test
@@ -84,8 +94,9 @@ data/seed/*
 *.prj
 !backend/app/tests/fixtures/**
 
-# ── Generated reports ────────────────────────────────────────────────────────
+# ── Generated reports & demo output ──────────────────────────────────────────
 reports/
+demo_output/
 *.generated.pdf
 
 # ── Databases ────────────────────────────────────────────────────────────────

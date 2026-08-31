@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from logging.config import fileConfig
 
-from alembic import context
 from sqlalchemy import engine_from_config, pool
 
+from alembic import context
 from app.config import get_settings
+from app.db import models
 from app.db.base import Base
-from app.db import models  # noqa: F401  -- import for metadata side effects
 
 config = context.config
 if config.config_file_name:
@@ -19,13 +19,10 @@ config.set_main_option("sqlalchemy.url", get_settings().database_url)
 target_metadata = Base.metadata
 
 
-def include_object(obj, name, type_, reflected, compare_to):  # type: ignore[no-untyped-def]
-    # PostGIS manages these itself; autogenerate must not try to drop them.
-    if type_ == "table" and name in {"spatial_ref_sys", "geography_columns", "geometry_columns"}:
-        return False
-    if type_ == "index" and name and name.startswith("idx_") and "geom" in name:
-        return False
-    return True
+#: Imported rather than defined here: `env.py` is run as a script by alembic,
+#: so the drift test in `app/tests/integration/test_schema_drift.py` could not
+#: otherwise apply the same rules alembic does.
+from alembic_env_helpers import include_object  # noqa: E402
 
 
 def run_migrations_offline() -> None:
