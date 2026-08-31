@@ -31,6 +31,9 @@ scipy==1.14.1
 rasterio==1.4.3
 pyproj==3.7.0
 shapely==2.0.6
+# Vector ingest for the cadastral upload (FR-11). Ships its own GDAL, so it does
+# not have to match rasterio's -- both bundle their own and coexist.
+fiona==1.10.1
 pysheds==0.4
 opencv-python-headless==4.10.0.84
 scikit-image==0.25.0
@@ -40,4 +43,13 @@ scikit-learn==1.6.0
 
 # ── Reporting (M7) ───────────────────────────────────────────────────────────
 Jinja2==3.1.5
+# HTML/CSS -> PDF for the report deliverable (M7-1). Needs Pango, Cairo and
+# GDK-PixBuf from apt -- see backend/Dockerfile; the wheel alone imports and
+# then fails at render time with an OSError about libgobject.
+weasyprint==62.3
+# Pinned because WeasyPrint 62.3 declares only `pydyf>=0.10.0`, and pydyf 0.11
+# changed the drawing API: with 0.12 installed, rendering dies on
+# `AttributeError: 'super' object has no attribute 'transform'`. Upstream's floor
+# is too loose, so the ceiling has to live here.
+pydyf==0.10.0
 matplotlib==3.10.0

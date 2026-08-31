@@ -25,11 +25,12 @@ os.environ.setdefault("REDIS_URL", "redis://127.0.0.1:1/0")
 def _isolated_cache_store(tmp_path: Path, request: pytest.FixtureRequest) -> Iterator[None]:
     """Point every disk cache at a fresh temporary directory for each test.
 
-    `COG_STORE_PATH` defaults to `/data/cache`, which is a volume inside the API
-    container. On a host run that path is unwritable, so the provider cache logged
-    `Permission denied: '/data'` on every enrichment — harmless, since a failed
-    cache write never costs the caller their answer, but it is noise that hides
-    real warnings.
+    Independent of what `COG_STORE_PATH` defaults to: a test must not read or
+    write the developer's real cache either way. (The default used to be the
+    container's `/data/cache`, so a host run also logged `Permission denied:
+    '/data'` on every enrichment. It now resolves to `<repo>/data/cache`, which
+    is writable — which makes this isolation load-bearing rather than incidental,
+    since without it tests would quietly populate the real cache.)
 
     Per test rather than per session, and that distinction was not obvious: with
     one store for the whole run, a test that stubs SoilGrids to fail was served a

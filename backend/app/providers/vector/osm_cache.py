@@ -36,7 +36,23 @@ DEFAULT_TTL_S = 14 * 24 * 3600
 #: (about a centimetre) share an entry instead of each fetching its own.
 KEY_PRECISION = 4
 
-CACHE_VERSION = 1
+#: v2 adds water multipolygon relations to the fetched window.
+CACHE_VERSION = 2
+
+#: Versions still readable. A v1 entry was fetched with a ways-only query, so a
+#: river mapped as a relation is absent from it -- but discarding it outright is
+#: worse than reading it: the analysis may be offline, in which case dropping a
+#: warm window removes OSM protection altogether rather than improving it. So v1
+#: is read and simply reports `water_relations=False`, which is exactly the
+#: truth: the ways are present, the relation supplement was never fetched.
+READABLE_VERSIONS = frozenset({1, 2})
+
+#: The *path* namespace, deliberately separate from `CACHE_VERSION`. The payload
+#: schema version says how to interpret a file; this says where the file lives.
+#: They were one value, which made bumping the schema silently repoint every key
+#: at an empty path -- the warm window was not upgraded, it was unreachable. Bump
+#: this only for a change that makes old entries genuinely unusable.
+CACHE_KEY_VERSION = 1
 
 
 def cell_for(bounds: tuple[float, float, float, float]) -> tuple[float, ...]:
@@ -47,7 +63,7 @@ def cell_for(bounds: tuple[float, float, float, float]) -> tuple[float, ...]:
 def cache_key(bounds: tuple[float, float, float, float]) -> str:
     import hashlib
 
-    joined = f"v{CACHE_VERSION}|" + "|".join(f"{v:.{KEY_PRECISION}f}" for v in cell_for(bounds))
+    joined = f"v{CACHE_KEY_VERSION}|" + "|".join(f"{v:.{KEY_PRECISION}f}" for v in cell_for(bounds))
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()
 
 
@@ -86,6 +102,7 @@ def write(store: Path, bounds: tuple[float, float, float, float], context: OsmCo
         "fetched_at": time.time(),
         "bounds": list(cell_for(bounds)),
         "endpoint": context.endpoint,
+        "water_relations": bool(context.water_relations),
         "features": [_feature_as_dict(f) for f in context],
     }
     try:
@@ -116,14 +133,19 @@ def read(
         log.warning("osm cache unreadable", path=str(target), error=str(exc))
         return None
 
-    if int(payload.get("version", 0)) != CACHE_VERSION:
+    version = int(payload.get("version", 0))
+    if version not in READABLE_VERSIONS:
         return None
     age = time.time() - float(payload.get("fetched_at", 0.0))
     if age > ttl_s:
         log.info("osm cache expired", age_days=round(age / 86400.0, 1))
         return None
 
-    context = OsmContext(endpoint=str(payload.get("endpoint", "")))
+    context = OsmContext(
+        endpoint=str(payload.get("endpoint", "")),
+        # Absent in v1, and False is the honest answer there.
+        water_relations=bool(payload.get("water_relations", False)),
+    )
     bucket = {
         "building": context.buildings,
         "road": context.roads,
@@ -141,7 +163,13 @@ def read(
         log.warning("osm cache malformed", path=str(target), error=str(exc))
         return None
 
-    log.info("osm cache hit", age_days=round(age / 86400.0, 1), **context.counts())
+    log.info(
+        "osm cache hit",
+        age_days=round(age / 86400.0, 1),
+        version=version,
+        water_relations=context.water_relations,
+        **context.counts(),
+    )
     return context
 
 

@@ -12,12 +12,21 @@ x-backend-env: &backend-env
   POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-contour_dev_only_change_me}
   REDIS_URL: redis://redis:6379/0
   COG_STORE_PATH: /data/cache
+  # Equal to COG_STORE_PATH here, which disables the tile-path translation: an
+  # API container and TiTiler see the store at the same path. It differs only
+  # when the API runs on the host -- see TILER_STORE_PATH in app/config.py.
+  TILER_STORE_PATH: /data/cache
   # /vsicurl tuning for reading remote COGs (Copernicus GLO-30 on AWS).
   # Without READDIR_ON_OPEN=EMPTY_DIR, GDAL lists the bucket prefix on every
   # open, which turns a 101 KB windowed read into a multi-second stall.
   GDAL_DISABLE_READDIR_ON_OPEN: EMPTY_DIR
   CPL_VSIL_CURL_ALLOWED_EXTENSIONS: ".tif,.tiff,.vrt"
   GDAL_HTTP_MAX_RETRY: "3"
+  # The dev container runs as the host's uid (see `user:` below), which has no
+  # entry in the image's /etc/passwd, so HOME would resolve to `/` -- unwritable.
+  # matplotlib builds the report figures and wants a config dir it can write.
+  HOME: /tmp
+  MPLCONFIGDIR: /tmp/matplotlib
   GDAL_HTTP_RETRY_DELAY: "1"
   GDAL_CACHEMAX: "256"
   VSI_CACHE: "TRUE"
@@ -70,7 +79,22 @@ services:
     volumes:
       - ./backend:/srv
       - ./data:/data
+      # The bundled sample sheet, so `make demo-warm` can warm the caches for
+      # the exact window the demo analyses. Read-only, and mounted OUTSIDE /srv
+      # and /data on purpose: both of those are themselves bind mounts of
+      # repository directories, and Docker creates a missing file mount target
+      # *on the host* -- so mounting to /srv/contours_1m.kml silently dropped a
+      # zero-byte backend/contours_1m.kml into the repo, which then shadowed the
+      # real sample for anything resolving it by walking up the tree.
+      - ./contours_1m.kml:/opt/contour-sample/contours_1m.kml:ro
     ports: ["${API_HOST_PORT:-8000}:8000"]
+    # The `dev` stage runs as root (only `prod` creates a user), so everything it
+    # wrote into the bind-mounted ./data became root-owned 755. A developer then
+    # running uvicorn on the host could read that cache but not write it, and
+    # /terrain/derivatives failed on a directory the project had created itself.
+    # Running as the caller keeps one shared cache usable from both sides.
+    # Override with HOST_UID/HOST_GID if your uid is not 1000.
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
     depends_on:
       postgis: {condition: service_healthy}
       redis: {condition: service_healthy}
@@ -85,6 +109,7 @@ services:
     volumes:
       - ./backend:/srv
       - ./data:/data
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
     depends_on:
       redis: {condition: service_healthy}
       postgis: {condition: service_healthy}
@@ -94,20 +119,39 @@ services:
   titiler:
     image: ghcr.io/developmentseed/titiler:0.19.0
     environment:
+      # The image is built on uvicorn-gunicorn, which defaults to PORT=80. The
+      # compose mapping and TITILER_ENDPOINT both name 8000, so without this the
+      # container starts, logs "Application startup complete", and refuses every
+      # connection -- a failure that looks like a network problem rather than a
+      # port mismatch.
+      PORT: "8000"
       TITILER_API_CORS_ORIGINS: "*"
       GDAL_CACHEMAX: "128"
       GDAL_DISABLE_READDIR_ON_OPEN: "EMPTY_DIR"
     volumes:
+      # Read-only, and the same directory the API writes COGs into. The API
+      # writes to a `.part` neighbour and renames, so a tile request can never
+      # observe a half-written raster at the final path.
       - ./data:/data:ro
     ports: ["${TITILER_HOST_PORT:-8001}:8000"]
-    profiles: ["tiles"]
+    healthcheck:
+      # 127.0.0.1 for the same reason as the other services: the app binds IPv4
+      # and `localhost` resolves to ::1 first inside the container.
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')\""]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 20s
 
   frontend:
     build:
       context: ./frontend
     ports: ["${FRONTEND_HOST_PORT:-8080}:80"]
-    depends_on: [api]
-    profiles: ["ui"]
+    depends_on:
+      # nginx resolves `api` at startup for the /api/ proxy_pass, so the name
+      # has to exist -- and waiting for healthy means the first request a user
+      # makes cannot hit an API that is still importing rasterio.
+      api: {condition: service_healthy}
 
 volumes:
   pgdata:

@@ -8,6 +8,8 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.docs import get_redoc_html
+from fastapi.responses import HTMLResponse
 
 from app.api.v1.router import api_router
 from app.config import get_settings
@@ -35,6 +37,10 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     log.info("shutdown")
 
 
+#: Pinned deliberately -- see the `/redoc` route below for what a moving tag did.
+REDOC_JS_URL = "https://cdn.jsdelivr.net/npm/redoc@2.5.3/bundles/redoc.standalone.js"
+
+
 def create_app() -> FastAPI:
     s = get_settings()
     app = FastAPI(
@@ -46,9 +52,28 @@ def create_app() -> FastAPI:
         version="0.1.0",
         lifespan=lifespan,
         docs_url="/docs",
-        redoc_url="/redoc",
+        # ReDoc is mounted by hand below so its bundle can be pinned.
+        redoc_url=None,
         openapi_url="/openapi.json",
     )
+
+    @app.get("/redoc", include_in_schema=False)
+    async def redoc() -> HTMLResponse:
+        """ReDoc, with its script pinned to a version that exists.
+
+        FastAPI's default points at `redoc@next` on jsdelivr, and that tag now
+        resolves to 3.0.0-rc.0, whose published files do not include
+        `bundles/redoc.standalone.js`. The request 404s, nothing is logged, and
+        the page renders as a blank white screen -- no error, no clue. Swagger UI
+        is unaffected because its URL pins a major version (`swagger-ui-dist@5`).
+        So this pins an exact one: a moving tag is what broke, and `@2` would
+        leave the same trap set for whenever 2.x is superseded.
+        """
+        return get_redoc_html(
+            openapi_url=app.openapi_url or "/openapi.json",
+            title=f"{app.title} - ReDoc",
+            redoc_js_url=REDOC_JS_URL,
+        )
 
     app.add_middleware(
         CORSMiddleware,

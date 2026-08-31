@@ -8,6 +8,7 @@ API key as a 500 three minutes into an analysis -- wastes far more time.
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 from typing import ClassVar, Literal
 
 from pydantic import Field, computed_field, field_validator
@@ -30,18 +31,50 @@ class Settings(BaseSettings):
     DEMO_MODE: bool = False
 
     # ── database ─────────────────────────────────────────────────────────────
-    POSTGRES_HOST: str = "postgis"
-    POSTGRES_PORT: int = 5432
+    #: Defaults address the stack *from the host*, because that is the only
+    #: context in which a default is consulted: `docker-compose.yml` sets
+    #: `POSTGRES_HOST: postgis` and `POSTGRES_PORT: 5432` for the containers
+    #: explicitly. In-cluster service names as defaults meant a host-run uvicorn
+    #: failed with "Temporary failure in name resolution" before it ever read a
+    #: setting the developer could see. The ports match the compose mapping,
+    #: which deliberately avoids 5432/6379 -- see `.env.example`.
+    POSTGRES_HOST: str = "localhost"
+    POSTGRES_PORT: int = 15432
     POSTGRES_DB: str = "contour"
     POSTGRES_USER: str = "contour"
     POSTGRES_PASSWORD: str = "contour_dev_only_change_me"
 
     # ── redis / celery ───────────────────────────────────────────────────────
-    REDIS_URL: str = "redis://redis:6379/0"
+    #: As above: the host-side address of the compose-published Redis port.
+    REDIS_URL: str = "redis://localhost:16379/0"
 
     # ── storage / tiles ──────────────────────────────────────────────────────
-    COG_STORE_PATH: str = "/data/cache"
-    TITILER_ENDPOINT: str = "http://titiler:8000"
+    #: Defaults to `<repo>/data/cache`, resolved from this file rather than from
+    #: the working directory, so `uvicorn` started in `backend/` and pytest
+    #: started at the root agree. The previous default was the container's
+    #: absolute `/data/cache`, which made every host run try to mkdir `/data`
+    #: and fail: two provider caches logged a warning and the derivatives
+    #: endpoint returned 500. Compose still sets `/data/cache` explicitly, and
+    #: because it bind-mounts `./data` there, host and container share one
+    #: directory -- a cache warmed in either is visible to the other.
+    COG_STORE_PATH: str = str(Path(__file__).resolve().parents[2] / "data" / "cache")
+    #: As above: compose maps TiTiler's 8000 to 8001 on the host.
+    TITILER_ENDPOINT: str = "http://localhost:8001"
+
+    #: Where the raster store appears *to TiTiler*, which is a separate container
+    #: with its own filesystem view.
+    #:
+    #: A tile URL carries `?url=<path to the COG>`, and TiTiler opens that path
+    #: itself -- so it must be TiTiler's path, not ours. The two agree only when
+    #: the API is also a container. Run the API on the host and it writes
+    #: `<repo>/data/cache/...` while TiTiler sees the same bytes at
+    #: `/data/cache/...`, so every tile came back HTTP 500 "No such file or
+    #: directory" and the slope and shaded-relief layers were silently blank
+    #: while the API reported success.
+    #:
+    #: `_tile_url` rewrites the `COG_STORE_PATH` prefix to this one. Setting them
+    #: equal disables the translation, which is what the containers do.
+    TILER_STORE_PATH: str = "/data/cache"
 
     # ── provider credentials: there are none ─────────────────────────────────
     # This project runs entirely on keyless open data, and that is a deliberate

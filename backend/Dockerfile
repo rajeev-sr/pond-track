@@ -13,8 +13,18 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 # libexpat1/libgomp1 are needed by the bundled GEOS/PROJ and by numba's OpenMP.
+#
+# The rest are WeasyPrint's, which renders the PDF report (M7-1). It draws text
+# through Pango and rasterises through Cairo, so the Python wheel is not
+# self-contained: without these it imports cleanly and then fails at render time
+# with an OSError about libgobject, which is a confusing way to find out.
+# shared-mime-info lets it identify embedded images by content, and
+# fonts-dejavu-core is there so the PDF has a font at all -- a slim image ships
+# none, and WeasyPrint silently falls back to blank glyphs.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl libexpat1 libgomp1 \
+        libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz0b \
+        libcairo2 libgdk-pixbuf-2.0-0 shared-mime-info fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /srv

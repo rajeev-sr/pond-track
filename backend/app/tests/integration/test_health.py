@@ -32,27 +32,68 @@ class TestLiveness:
 
 
 class TestReadiness:
-    def test_reports_degraded_when_dependencies_are_down(self, client) -> None:  # type: ignore[no-untyped-def]
-        r = client.get("/api/v1/health/ready")
-        assert r.status_code == 503
-        body = r.json()
-        assert body["status"] == "degraded"
-        assert set(body["checks"]) == {"database", "redis"}
+    """Readiness has to be correct in both directions, and the suite runs in both.
 
-    def test_lists_every_gated_feature(self, client) -> None:  # type: ignore[no-untyped-def]
+    The offline conftest points the database and Redis probes at a closed port,
+    so the endpoint should report `degraded`. Run inside the container -- which
+    is how the integration suite executes against a real stack -- those services
+    genuinely answer, and it should report `ready`.
+
+    An earlier version asserted 503 unconditionally and failed the moment it met
+    a working stack, reporting healthy dependencies as a defect. What is actually
+    invariant is that the reported status matches the probes, and that both
+    dependencies are always named either way.
+    """
+
+    def test_the_status_matches_what_the_probes_found(self, client) -> None:  # type: ignore[no-untyped-def]
+        r = client.get("/api/v1/health/ready")
+        body = r.json()
+        assert set(body["checks"]) == {"database", "redis"}, "a dependency vanished from the report"
+
+        # Each check is `{"status": "ok" | ..., "latency_ms": ...}`.
+        all_up = all(check.get("status") == "ok" for check in body["checks"].values())
+        if all_up:
+            assert r.status_code == 200
+            assert body["status"] == "ready"
+        else:
+            assert r.status_code == 503
+            assert body["status"] == "degraded"
+
+    def test_a_closed_port_is_reported_degraded(self, client) -> None:  # type: ignore[no-untyped-def]
+        """The offline case specifically: nothing reachable means not ready."""
+        r = client.get("/api/v1/health/ready")
+        checks = r.json()["checks"]
+        down = [name for name, check in checks.items() if check.get("status") != "ok"]
+        if not down:
+            pytest.skip("every dependency is reachable here; nothing to degrade")
+        assert r.status_code == 503
+        assert r.json()["status"] == "degraded"
+
+    def test_lists_the_data_capabilities(self, client) -> None:  # type: ignore[no-untyped-def]
         features = client.get("/api/v1/health/ready").json()["features"]
-        for f in ("dem_acquisition", "bhuvan_layers", "bhoonidhi_cartodem", "sentinel2_ndwi"):
+        for f in ("dem_acquisition", "land_cover", "soil", "rainfall_reanalysis"):
             assert f in features
 
-    def test_unconfigured_features_say_what_is_missing(self, client) -> None:  # type: ignore[no-untyped-def]
-        features = client.get("/api/v1/health/ready").json()["features"]
-        assert "BHUVAN_TOKEN" in features["bhuvan_layers"]
+    def test_every_feature_is_available_because_none_needs_a_key(
+        self, client
+    ) -> None:  # type: ignore[no-untyped-def]
+        """★ Readiness reports no missing credentials, because there are none.
 
-    def test_dem_acquisition_available_without_any_key(self, client) -> None:  # type: ignore[no-untyped-def]
-        # The headline consequence of Decision 12: an empty .env still gives a
-        # runnable mandatory pipeline.
+        This used to assert the opposite -- that `bhuvan_layers` reported
+        "missing: BHUVAN_TOKEN". Five such lines described features that were
+        never built, and read to anyone running the stack as five things wrong
+        with their setup.
+        """
         features = client.get("/api/v1/health/ready").json()["features"]
-        assert features["dem_acquisition"] == "available"
+        assert features, "no features reported at all"
+        for name, state in features.items():
+            assert state == "available", f"{name} reports {state!r}"
+            assert "missing" not in state
+
+    def test_the_response_names_no_credential(self, client) -> None:  # type: ignore[no-untyped-def]
+        body = str(client.get("/api/v1/health/ready").json()).lower()
+        for word in ("api_key", "token", "client_secret", "bhuvan", "bhoonidhi"):
+            assert word not in body, word
 
     def test_never_leaks_a_credential_value(self, client) -> None:  # type: ignore[no-untyped-def]
         assert "PASSWORD" not in client.get("/api/v1/health/ready").text.upper()

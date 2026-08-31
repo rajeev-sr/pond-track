@@ -244,15 +244,43 @@ def _describe_existing(path: Path, product: raster.Product) -> raster.RasterAsse
     )
 
 
+def tiler_path(path: Path | str) -> str:
+    """`path` as TiTiler sees it.
+
+    A tile URL carries `?url=<the COG>` and TiTiler opens that path with its own
+    filesystem, so the path has to be TiTiler's. Ours is the same string only
+    when the API is a container too: run the API on the host and it writes
+    `<repo>/data/cache/x.tif` while TiTiler serves the identical bytes from
+    `/data/cache/x.tif`. Passing our path made every tile 500 with "No such file
+    or directory" while the API itself reported success -- the layers were simply
+    blank, which is the worst way for this to fail.
+
+    So the `COG_STORE_PATH` prefix is rewritten to `TILER_STORE_PATH`. Equal
+    values are a no-op, which is the container case. A path outside the store is
+    returned untouched: a remote `/vsicurl` URL is already something TiTiler can
+    open, and inventing a prefix for it would break it.
+    """
+    from app.config import get_settings
+
+    settings = get_settings()
+    ours = Path(settings.COG_STORE_PATH).resolve()
+    theirs = str(settings.TILER_STORE_PATH).rstrip("/")
+    if not theirs or str(ours) == theirs:
+        return str(path)
+    try:
+        relative = Path(path).resolve().relative_to(ours)
+    except ValueError:
+        return str(path)
+    return f"{theirs}/{relative.as_posix()}"
+
+
 def _tile_url(asset: raster.RasterAsset) -> str:
     """A tile template the browser can use directly.
 
-    `url` is the path inside the tiler's container -- both services mount the
-    same directory, so the API writes a path the tiler can open. The braces are
-    left unexpanded for the map client to fill.
+    The braces are left unexpanded for the map client to fill.
     """
     colouring = COLOURING[asset.product]
-    params = [f"url={asset.path}"]
+    params = [f"url={tiler_path(asset.path)}"]
 
     rescale = colouring.get("rescale")
     if rescale is None:

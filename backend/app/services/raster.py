@@ -205,7 +205,18 @@ def write_cog(
     categories that do not exist.
     """
     destination = Path(destination)
-    destination.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        # An unwritable store is a configuration fault, not a bug, and it must
+        # arrive as a `RasterWriteError` so the endpoint's existing handler turns
+        # it into an actionable answer. Raw, this surfaced as an unhandled 500
+        # with a 200-line traceback: `COG_STORE_PATH` defaults to a path inside
+        # the container, so running uvicorn on the host tried to mkdir `/data`.
+        raise RasterWriteError(
+            f"the raster store {destination.parent} is not writable ({exc.strerror}). "
+            "COG_STORE_PATH points there; set it to a directory this process owns."
+        ) from exc
 
     data = np.asarray(array)
     if data.ndim != 2:
