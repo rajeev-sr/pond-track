@@ -6,7 +6,21 @@
     <title>Contour — Village Pond Planning</title>
     <meta
       name="description"
-      content="Upload a contour map and see where a pond should go, the land that drains to it, and how much it would hold."
+      content="Pond siting and catchment assessment for Indian villages, from a contour survey sheet."
+    />
+    <!-- Newsreader for headings, IBM Plex Sans for text, IBM Plex Mono for every
+         figure. Preconnected so the first paint is not held up by a DNS round
+         trip, and each family carries a real fallback stack in styles.css so the
+         layout is intact if the CDN is unreachable. -->
+    <!-- Inline so there is no extra request and nothing to 404. The app had no
+         favicon at all, which showed as a blank tab and a console 404 on every
+         load. Same contour glyph as the wordmark. -->
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%23f6f3ec'/%3E%3Cg fill='none' stroke='%23b08a63' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M3 27c5-5 9-10 13-12'/%3E%3Cpath d='M3 20c6-5 11-9 17-11'/%3E%3Cpath d='M3 13c7-6 13-9 21-10'/%3E%3C/g%3E%3Ccircle cx='20' cy='21' r='4.5' fill='%231f5f80'/%3E%3C/svg%3E" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,300..600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
     />
   </head>
   <body>
