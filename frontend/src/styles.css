@@ -1,0 +1,1002 @@
+/* Dark by default: the map is the subject and a light chrome fights it.
+   Contrast ratios below are checked against WCAG 2.1 AA (HLD NFR-14). */
+:root {
+  --bg: #0b1118;
+  --panel: #131c26;
+  --panel-2: #1a2634;
+  --line: #24384b;
+  --text: #e6edf3; /* 13.6:1 on --bg */
+  --muted: #9fb3c8; /*  7.1:1 on --bg */
+  --accent: #22d3ee;
+  --amber: #f59e0b;
+  --violet: #a78bfa;
+  --ok: #34d399;
+  --warn: #fbbf24;
+  --danger: #f87171;
+  --radius: 8px;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font:
+    14px/1.5 system-ui,
+    -apple-system,
+    "Segoe UI",
+    Roboto,
+    sans-serif;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Keyboard focus must always be visible (WCAG 2.4.7). */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.topbar {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+.topbar h1 {
+  font-size: 16px;
+  margin: 0;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+.topbar h1 .muted {
+  font-weight: 400;
+  margin-left: 10px;
+}
+.topbar a {
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 13px;
+}
+.topbar a:hover {
+  text-decoration: underline;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: 300px 1fr 380px;
+  flex: 1;
+  min-height: 0;
+}
+@media (max-width: 1100px) {
+  .layout {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 45vh auto;
+  }
+}
+
+.sidebar,
+.results-pane {
+  overflow-y: auto;
+  background: var(--panel);
+  border-right: 1px solid var(--line);
+}
+.results-pane {
+  border-right: 0;
+  border-left: 1px solid var(--line);
+}
+
+.stage {
+  position: relative;
+  min-height: 0;
+}
+.map {
+  position: absolute;
+  inset: 0;
+}
+
+.panel {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.panel h2 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--muted);
+  margin: 0 0 10px;
+}
+.panel h3 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--muted);
+  margin: 18px 0 8px;
+}
+
+.muted {
+  color: var(--muted);
+}
+.small {
+  font-size: 12px;
+}
+
+.dropzone {
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
+  padding: 18px 14px;
+  text-align: center;
+  background: var(--panel-2);
+  transition:
+    border-color 0.15s,
+    background 0.15s;
+}
+.dropzone--active {
+  border-color: var(--accent);
+  background: #16303a;
+}
+.dropzone p {
+  margin: 0 0 8px;
+  word-break: break-all;
+}
+
+button {
+  font: inherit;
+  border-radius: 6px;
+  cursor: pointer;
+  border: 1px solid var(--line);
+  padding: 8px 12px;
+}
+button.primary {
+  width: 100%;
+  margin-top: 12px;
+  background: var(--accent);
+  color: #062028;
+  border-color: transparent;
+  font-weight: 600;
+}
+button.primary:disabled {
+  background: var(--panel-2);
+  color: var(--muted);
+  cursor: not-allowed;
+}
+button.secondary {
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+.options {
+  margin-top: 12px;
+}
+.options summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+}
+.options label {
+  display: flex;
+  justify-content: space-between;
+  margin: 12px 0 4px;
+  font-size: 13px;
+}
+.options .value {
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+.options input[type="range"] {
+  width: 100%;
+  accent-color: var(--accent);
+}
+.options .checkbox {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-start;
+}
+
+.layers {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.layers li {
+  margin: 7px 0;
+}
+.layers label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+.swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  flex: none;
+}
+
+/* Drainage-network extent, under the layer it changes. Indented to the swatch so
+   it reads as belonging to that row rather than as a new control. */
+.scope {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0 2px 20px;
+  flex-wrap: wrap;
+}
+/* `scope-chip`, not `chip`: `.chip` is already the site-kind badge on a result
+   card, and it carries `margin-left: auto`. Reusing the name put these buttons
+   under whichever rule came last in the file. */
+.scope-chip {
+  padding: 2px 8px;
+  font-size: 12px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.scope-chip:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+.scope-chip.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  /* Not colour alone: the pressed chip is also the only bold one, and it carries
+     aria-pressed for anyone who cannot see either (WCAG 1.4.1). */
+  font-weight: 600;
+}
+.scope-chip:disabled {
+  opacity: 0.5;
+  cursor: progress;
+}
+
+/* How many ranked sites are drawn. Same shape as the upload panel's sliders, so
+   it reads as the same kind of control. */
+.shown-sites {
+  margin: 6px 0 10px;
+}
+.shown-sites label {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+  margin-bottom: 4px;
+}
+.shown-sites .value {
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+.shown-sites input[type="range"] {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.facts {
+  margin: 0;
+  display: grid;
+  gap: 6px;
+}
+.fact {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: baseline;
+}
+.fact dt {
+  color: var(--muted);
+  font-size: 12px;
+}
+.fact dd {
+  margin: 0;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.tier {
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  font-size: 12px;
+  background: var(--panel-2);
+  border-left: 3px solid var(--muted);
+  margin: 0 0 10px;
+}
+.tier--ok {
+  border-left-color: var(--ok);
+}
+.tier--warn {
+  border-left-color: var(--warn);
+}
+.warn-line {
+  color: var(--warn);
+  font-size: 12px;
+  margin: 4px 0;
+}
+
+.sites {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+.site-card {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  color: inherit;
+}
+.site-card:hover {
+  border-color: var(--accent);
+}
+.site-card--selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent) inset;
+}
+.site-card header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.rank {
+  font-weight: 700;
+  color: var(--amber);
+}
+.score {
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+}
+.chip {
+  margin-left: auto;
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+.chip--natural_depression {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
+.binding {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--warn);
+}
+.why {
+  margin-top: 8px;
+}
+.why summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--muted);
+}
+.criteria {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.criteria li {
+  display: grid;
+  grid-template-columns: 1fr 60px auto;
+  gap: 8px;
+  align-items: center;
+  font-size: 12px;
+}
+.bar {
+  background: var(--line);
+  border-radius: 3px;
+  height: 6px;
+  overflow: hidden;
+}
+.bar > span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+
+.warnings {
+  margin-top: 14px;
+}
+.warnings summary {
+  cursor: pointer;
+  color: var(--warn);
+  font-size: 12px;
+}
+.warnings ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.overlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  gap: 8px;
+  justify-items: center;
+  text-align: center;
+  padding: 24px;
+  background: rgba(11, 17, 24, 0.84);
+  backdrop-filter: blur(2px);
+}
+.overlay--error {
+  background: rgba(11, 17, 24, 0.93);
+}
+.overlay--error h2 {
+  color: var(--danger);
+  margin: 0;
+  font-size: 16px;
+}
+.overlay p {
+  margin: 0;
+  max-width: 46ch;
+}
+
+.spinner {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 3px solid var(--line);
+  border-top-color: var(--accent);
+  animation: spin 900ms linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Respect a reduced-motion preference (WCAG 2.3.3). */
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+.maplibregl-ctrl-attrib {
+  font-size: 10px;
+}
+
+/* ── basemap selector ─────────────────────────────────────────────────────── */
+.basemaps {
+  margin: 14px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+}
+.basemaps legend {
+  padding: 0 6px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--muted);
+}
+.basemaps label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+/* ── data attribution ─────────────────────────────────────────────────────── */
+.attribution .sources {
+  margin: 0;
+}
+.attribution .sources > div {
+  margin-bottom: 9px;
+}
+.attribution dt {
+  font-size: 13px;
+}
+.attribution dt a {
+  color: var(--text);
+  text-decoration: none;
+  border-bottom: 1px dotted var(--line);
+}
+.attribution dt a:hover {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+.attribution dd {
+  margin: 1px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.attribution > p {
+  margin: 12px 0 0;
+  line-height: 1.5;
+}
+
+/* ── site rank labels (DOM markers, so they work with no glyphs endpoint) ─── */
+.site-rank {
+  font:
+    600 11px/1 ui-sans-serif,
+    system-ui,
+    sans-serif;
+  color: #fde68a;
+  background: rgba(17, 24, 39, 0.82);
+  border: 1px solid rgba(245, 158, 11, 0.55);
+  border-radius: 999px;
+  padding: 3px 7px;
+  cursor: pointer;
+  white-space: nowrap;
+  /* The circle layers beneath carry the position; this rides above them. */
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+}
+.site-rank:hover {
+  border-color: var(--amber);
+}
+.site-rank--selected {
+  color: #111827;
+  background: var(--amber);
+  border-color: #fde68a;
+}
+.site-rank:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ── village search ───────────────────────────────────────────────────────── */
+.village-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.village-search input {
+  flex: 1;
+  padding: 9px 11px;
+  font: inherit;
+  font-size: 14px;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.village-search input::placeholder {
+  color: var(--muted);
+}
+.village-search input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.spinner--inline {
+  width: 14px;
+  height: 14px;
+  border-width: 2px;
+  position: absolute;
+  right: 10px;
+}
+
+.suggestions {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  overflow: hidden;
+}
+.suggestions li + li {
+  border-top: 1px solid var(--line);
+}
+.suggestions button {
+  display: block;
+  width: 100%;
+  padding: 8px 11px;
+  text-align: left;
+  background: none;
+  border: 0;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+}
+.suggestions li.is-active button,
+.suggestions button:hover {
+  background: rgba(34, 211, 238, 0.1);
+}
+.suggestions li.is-chosen button {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.suggestion-name {
+  display: block;
+  font-size: 14px;
+}
+.suggestion-where {
+  display: block;
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 1px;
+}
+/* Only shown when the hierarchy above it cannot separate two villages, so it
+   needs to read as the thing that does. */
+.suggestion-disambiguator {
+  display: inline-block;
+  margin-top: 4px;
+  padding: 1px 6px;
+  font-size: 11px;
+  color: var(--warn);
+  border: 1px solid rgba(251, 191, 36, 0.35);
+  border-radius: 999px;
+}
+.note {
+  margin: 8px 0 0;
+  line-height: 1.5;
+}
+.village-note {
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* Eight results is a tall list, and it sits above the upload panel. Capping it
+   keeps the rest of the sidebar reachable without scrolling past the
+   suggestions. */
+.suggestions {
+  max-height: 268px;
+  overflow-y: auto;
+}
+
+/* ── clicked-catchment panel ──────────────────────────────────────────────── */
+.link-button {
+  margin-top: 10px;
+  padding: 0;
+  font: inherit;
+  font-size: 12px;
+  color: var(--accent);
+  background: none;
+  border: 0;
+  border-bottom: 1px solid transparent;
+  cursor: pointer;
+}
+.link-button:hover {
+  border-bottom-color: var(--accent);
+}
+.link-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+/* The map is clickable now, so say so. */
+.map canvas {
+  cursor: crosshair;
+}
+
+/* ---- Water balance: rainfall chart + runoff tiles ---------------------- */
+/* The chart sits directly on --panel, the surface its mark colours were
+   validated against; a card background would change that surface. */
+.water {
+  margin: 0;
+}
+.chart {
+  margin: 0 0 10px;
+}
+.chart figcaption {
+  color: var(--text);
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+.chart-plot {
+  position: relative;
+}
+.chart-plot svg {
+  width: 100%;
+  height: auto;
+  display: block;
+  overflow: visible;
+}
+
+.chart-grid {
+  stroke: var(--line);
+  stroke-width: 1;
+}
+.chart-tick {
+  fill: var(--muted);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+}
+.chart-value {
+  fill: var(--text);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.chart-month {
+  fill: var(--muted);
+  font-size: 9px;
+}
+/* The monsoon months read as emphasised in the axis too -- weight, not colour,
+   so the label never borrows the mark's fill. */
+.chart-month--on {
+  fill: var(--text);
+  font-weight: 600;
+}
+
+.chart-tip {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 3px 7px;
+  font-size: 11px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.chart-table summary {
+  color: var(--muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+.chart-table table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 6px;
+  font-size: 11px;
+}
+.chart-table th,
+.chart-table td {
+  text-align: right;
+  padding: 2px 4px;
+  font-weight: normal;
+}
+.chart-table thead th {
+  color: var(--muted);
+  border-bottom: 1px solid var(--line);
+}
+.chart-table tbody th {
+  text-align: left;
+  color: var(--muted);
+}
+.chart-table td {
+  font-variant-numeric: tabular-nums;
+}
+
+.kpis {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(88px, 1fr));
+  gap: 6px;
+}
+.kpi {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 7px 9px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.kpi-label {
+  color: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.kpi-value {
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+}
+.kpi-hint {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+/* ---- Stage–storage chart ---------------------------------------------- */
+.chart-line {
+  fill: none;
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+/* Dashing the unbounded tail is a second encoding beside the colour, so the
+   distinction survives a colour-blind reader and a greyscale print. */
+.chart-line--dashed {
+  stroke-dasharray: 5 3;
+}
+/* The surface ring keeps a dot legible where it crosses the line. */
+.chart-dot {
+  stroke: var(--panel);
+  stroke-width: 2;
+}
+.chart-rule {
+  stroke: var(--muted);
+  stroke-width: 1;
+  stroke-dasharray: 2 3;
+}
+.chart-annotation {
+  fill: var(--muted);
+  font-size: 9px;
+}
+.chart-crosshair line {
+  stroke: var(--muted);
+  stroke-width: 1;
+}
+.chart-crosshair circle {
+  fill: var(--text);
+}
+
+.chart-legend {
+  list-style: none;
+  margin: 0 0 4px;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 10px;
+  color: var(--muted);
+}
+.chart-legend li {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.chart-legend .swatch {
+  width: 12px;
+  height: 3px;
+  border-radius: 2px;
+  display: inline-block;
+}
+.chart-legend .swatch--dashed {
+  background-image: linear-gradient(
+    90deg,
+    currentColor 0 60%,
+    transparent 60% 100%
+  );
+  background-size: 5px 3px;
+}
+
+/* ---- Available-land parcels ------------------------------------------- */
+.parcel-note {
+  color: var(--muted);
+  font-size: 11px;
+  margin: 4px 0 0;
+}
+
+/* ---- Job progress ------------------------------------------------------ */
+.job {
+  display: grid;
+  gap: 6px;
+}
+.job-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+}
+.job-pct {
+  font-variant-numeric: tabular-nums;
+}
+
+.job-track {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--panel-2);
+  overflow: hidden;
+}
+.job-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 3px;
+  transition: width 400ms ease-out;
+}
+/* A retry is a different situation, and the bar says so without moving. */
+.job-fill--retrying {
+  background: var(--warn);
+}
+
+/* The steps strip: each item's flex-grow is its measured share of the runtime,
+   so the widths are the schedule rather than decoration. */
+.job-steps {
+  list-style: none;
+  margin: 2px 0 0;
+  padding: 0;
+  display: flex;
+  gap: 2px;
+}
+.job-step {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+.job-step-bar {
+  height: 3px;
+  border-radius: 2px;
+  background: var(--line);
+  display: block;
+}
+.job-step--done .job-step-bar,
+.job-step--skipped .job-step-bar {
+  background: var(--muted);
+}
+.job-step--running .job-step-bar {
+  background: var(--accent);
+}
+.job-step--failed .job-step-bar {
+  background: var(--warn);
+}
+/* Only the running step is named in the strip; the rest would not fit legibly
+   and are carried by the title attribute and the heading above. */
+/* The strip is geometry, not labels: the heading above names the running step in
+   full, so printing it again inside a 20px band was redundant. Kept in the DOM
+   for assistive technology, which reads the outcome glyph with it. */
+.job-step-name {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.job-meta {
+  margin: 0;
+}
+/* The progress bar needs room the spinner did not. */
+.overlay-job {
+  width: min(460px, 80vw);
+  text-align: left;
+}
+
+/* ---- Empty state ------------------------------------------------------- */
+/* Zero results is an answer. It gets the same weight as a result, and says
+   which constraint emptied the set rather than leaving a blank list. */
+.empty {
+  background: var(--panel-2);
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+}
+.empty p {
+  margin: 0 0 4px;
+}
+.empty p:last-child {
+  margin-bottom: 0;
+}

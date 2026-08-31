@@ -1,0 +1,9 @@
+# Keep the build context small and deterministic. Without this, `docker build`
+# uploads node_modules (tens of thousands of files) and a stale dist/ on every
+# run, which is slow and invites the image to pick up host-built artefacts
+# instead of building its own.
+node_modules
+dist
+.vite
+*.log
+.DS_Store
