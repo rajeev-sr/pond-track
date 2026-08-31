@@ -111,6 +111,11 @@ class PondDesign:
                 "depth_m": round(self.depth_m, 2),
                 "freeboard_m": self.freeboard_m,
                 "side_slope": f"1V : {self.side_slope_h_per_v:g}H",
+                # The number as well as the label. The formatted string is for a
+                # reader; a consumer that needs the geometry -- the water balance
+                # does -- should not have to parse prose to get a design
+                # parameter back out.
+                "side_slope_h_per_v": self.side_slope_h_per_v,
                 "top_length_m": round(self.top_length_m, 1),
                 "top_width_m": round(self.top_width_m, 1),
                 "bottom_length_m": round(self.bottom_length_m, 1),

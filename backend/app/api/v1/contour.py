@@ -78,20 +78,30 @@ def _safe_filename(raw: str | None) -> str:
     return cleaned[:_FILENAME_SAFE] or "upload"
 
 
-async def _read_upload(file: UploadFile) -> tuple[bytes, str]:
+async def _read_upload(
+    file: UploadFile,
+    *,
+    accepted: tuple[str, ...] = ACCEPTED_SUFFIXES,
+    describe_as: str = "a contour map",
+) -> tuple[bytes, str]:
     """Read and pre-validate an uploaded file.
 
     Reads in chunks and aborts as soon as the cap is exceeded. `await file.read()`
     would buffer the entire body *before* the size check, so a 500 MB POST would
     be fully materialised in memory only to be rejected -- the check would exist
     while the denial-of-service it was meant to prevent still worked.
+
+    The accepted extensions are a parameter because the cadastral upload takes a
+    different set. They defaulted to the contour-map list, which silently
+    rejected every `.geojson` and `.zip` sent to that endpoint with a message
+    about contour maps.
     """
     name = _safe_filename(file.filename)
-    if not name.lower().endswith(ACCEPTED_SUFFIXES):
+    if not name.lower().endswith(accepted):
         raise ValidationProblem(
-            f"{name!r} does not look like a contour map. Expected a "
-            f"{', '.join(ACCEPTED_SUFFIXES)} file.",
-            accepted_extensions=list(ACCEPTED_SUFFIXES),
+            f"{name!r} does not look like {describe_as}. Expected a "
+            f"{', '.join(accepted)} file.",
+            accepted_extensions=list(accepted),
         )
 
     chunks: list[bytes] = []
@@ -852,6 +862,102 @@ async def land_available(
         },
     }
     return body
+
+
+@router.post(
+    "/land/cadastral",
+    summary="Upload a cadastral layer and check tenure at each site (M10-3, M10-4, FR-11)",
+    description=(
+        "Accepts a GeoJSON or a zipped shapefile of land parcels, reprojects it "
+        "to WGS 84, and classifies each parcel's tenure. Give a `job_id` as well "
+        "and every candidate site from that analysis is checked against the "
+        "parcel it falls on.\n\n"
+        "**This is the largest gap between 'recommended' and 'buildable'.** No "
+        "open dataset carries village-level ownership, so a site that is "
+        "physically ideal may be privately held. The model cannot close that gap "
+        "on its own; this lets someone who has the layer close it.\n\n"
+        "**The datum matters more than it looks.** Indian cadastral sheets are "
+        "frequently on Everest 1830 / Kalianpur. PROJ's default choice of "
+        "transformation for those is a *ballpark offset that moves nothing*, "
+        "which would leave every parcel about 190 m from its true position while "
+        "looking entirely correct. The operation is therefore chosen explicitly "
+        "and reported with its stated accuracy, and a shapefile arriving without "
+        "a `.prj` is refused rather than assumed to be WGS 84.\n\n"
+        "The upload is parsed defensively: zip bombs, path traversal, symlinks "
+        "and absurd entry counts are all rejected before anything is written."
+    ),
+    responses={400: {"description": "The layer could not be ingested; the reason says why."}},
+)
+async def upload_cadastral(
+    file: Annotated[UploadFile, File(description="GeoJSON, or a zipped shapefile.")],
+    job_id: Annotated[
+        str | None,
+        Form(description="An analysis job, to report tenure at each candidate site."),
+    ] = None,
+) -> Any:
+    from app.services import cadastral
+
+    data, filename = await _read_upload(
+        file,
+        accepted=(".geojson", ".json", ".zip"),
+        describe_as="a cadastral layer",
+    )
+    try:
+        layer = await run_in_threadpool(cadastral.load, data, filename)
+    except cadastral.CadastralError as exc:
+        raise ValidationProblem(
+            detail=str(exc), errors=[{"field": "file", "message": str(exc)}]
+        ) from exc
+
+    body: dict[str, Any] = {
+        "summary": layer.as_dict(),
+        "parcels": layer.feature_collection(),
+    }
+
+    if job_id:
+        from app.services.job_store import get_store
+
+        record = get_store().get(job_id)
+        if record is None:
+            raise NotFoundProblem(detail=f"no analysis job with id {job_id!r}.", job_id=job_id)
+        sites = (record.result or {}).get("candidate_sites") or []
+        body["sites"] = _tenure_at_sites(sites, layer)
+
+    return body
+
+
+def _tenure_at_sites(sites: list[Any], layer: Any) -> list[dict[str, Any]]:
+    """Which parcel each candidate site falls on, and whether it is allottable.
+
+    A point-in-polygon test, not a nearest-parcel search: a site 50 m outside
+    every parcel is *not* on public land, and saying "unknown" is the honest
+    answer rather than attaching it to whichever polygon happens to be closest.
+    """
+    from shapely.geometry import Point, shape
+
+    prepared = [(shape(p.geometry), p) for p in layer.parcels]
+    out: list[dict[str, Any]] = []
+    for site in sites:
+        location = site.get("location") or {}
+        if "lon" not in location:
+            continue
+        point = Point(float(location["lon"]), float(location["lat"]))
+        match = next((parcel for geom, parcel in prepared if geom.contains(point)), None)
+        out.append(
+            {
+                "rank": site.get("rank"),
+                "suitability_score": site.get("suitability_score"),
+                "parcel_id": None if match is None else match.parcel_id,
+                "ownership": None if match is None else match.ownership,
+                "tenure": (
+                    "unknown -- the site falls outside every parcel in the layer"
+                    if match is None
+                    else ("allottable" if match.is_public else "privately held")
+                ),
+                "parcel_area_ha": None if match is None else round(match.area_ha, 3),
+            }
+        )
+    return out
 
 
 class _PourPointOutsideError(Exception):

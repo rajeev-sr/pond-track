@@ -25,6 +25,7 @@ from fastapi import (
     Depends,
     File,
     Form,
+    Query,
     Response,
     UploadFile,
     status,
@@ -459,3 +460,80 @@ async def job_sites(job_id: str) -> Any:
         ],
         "warnings": record.progress.get("warnings", []),
     }
+
+
+@router.get(
+    "/{job_id}/compare",
+    summary="Two to five candidate sites side by side (M10-6, FR-12)",
+    description=(
+        "A decision-shaped comparison, not a second copy of the numbers.\n\n"
+        "`GET /suitability/{job_id}/sites` already returns every site's figures; "
+        "printing them in columns would add nothing. This reports what those "
+        "payloads cannot: **who leads on each metric and by how much**, with the "
+        "direction stated (higher is better for capacity, worse for cost); two "
+        "derived metrics that exist in no single site — the share of its "
+        "catchment's yield the pond can actually hold, and cost per cubic metre "
+        "of *live* storage; and the trade-off in words, since a site can lose on "
+        "capacity and still be the right choice when its limit is one you can "
+        "fix.\n\n"
+        "Metrics whose spread across the sites is under 1 % pick no winner and "
+        "are flagged `uniform`. Cost per cubic metre of gross capacity is "
+        "identical by construction — cost is excavated volume times a flat rate "
+        "— and declaring a winner on that would invite a decision based on an "
+        "artefact of the cost model.\n\n"
+        "Pass `ranks` to choose sites, e.g. `?ranks=1,3`; the top three are "
+        "compared by default."
+    ),
+)
+async def compare_sites(
+    job_id: str,
+    ranks: Annotated[
+        str | None,
+        Query(description="Comma-separated site ranks, 2 to 5 of them. Defaults to the top three."),
+    ] = None,
+) -> Any:
+    from app.services import comparison
+    from app.services.job_store import get_store
+
+    record = get_store().get(job_id)
+    if record is None:
+        raise NotFoundProblem(detail=f"no analysis job with id {job_id!r}.", job_id=job_id)
+    state = record.progress.get("state")
+    if state not in ("done", "partial") or not record.result:
+        raise UnanswerableProblem(
+            detail=f"job {job_id!r} is {state!r}, so it has no sites to compare.",
+            job_id=job_id,
+            state=state,
+        )
+
+    sites = (record.result or {}).get("candidate_sites") or []
+    by_rank = {int(s.get("rank", i + 1)): s for i, s in enumerate(sites)}
+
+    if ranks:
+        try:
+            wanted = [int(part) for part in ranks.split(",") if part.strip()]
+        except ValueError as exc:
+            raise ValidationProblem(
+                detail=f"ranks must be comma-separated integers; got {ranks!r}",
+                errors=[{"field": "ranks", "message": str(exc)}],
+            ) from exc
+        missing = [r for r in wanted if r not in by_rank]
+        if missing:
+            raise ValidationProblem(
+                detail=(
+                    f"this analysis has no site(s) ranked {missing}; it found "
+                    f"{len(sites)} ({sorted(by_rank)})."
+                ),
+                errors=[{"field": "ranks", "message": f"unknown: {missing}"}],
+            )
+        chosen = [by_rank[r] for r in wanted]
+    else:
+        chosen = sites[:3]
+
+    try:
+        body = comparison.compare(chosen)
+    except ValueError as exc:
+        raise ValidationProblem(
+            detail=str(exc), errors=[{"field": "ranks", "message": str(exc)}]
+        ) from exc
+    return {"job_id": job_id, "state": state, **body}

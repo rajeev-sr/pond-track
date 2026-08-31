@@ -25,8 +25,8 @@ import numpy.typing as npt
 from app.providers.elevation.base import DemGrid
 from app.providers.elevation.contour_kml import ParsedContours, parse_contour_file
 from app.providers.rainfall import ensemble as rainfall_ensemble
+from app.services import explain, indian_runoff, siting, water_balance
 from app.services import hydrology as hyd
-from app.services import indian_runoff, siting
 from app.services import pond as pond_design
 from app.services import runoff as runoff_service
 from app.services.enrichment import Enrichment, fetch_enrichment
@@ -108,6 +108,7 @@ class ContourAnalysis:
     elapsed_s: float
     stage_timings: dict[str, float]
     options: ContourAnalysisOptions
+    exclusions: Any | None = None
     source_filename: str | None = None
     source_bytes: int = 0
     generated_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
@@ -147,12 +148,21 @@ class ContourAnalysis:
                 "criteria_weights": {k: round(v, 4) for k, v in self.siting_result.weights.items()},
                 "constraints_applied": self.siting_result.constraints,
                 "feasible_cells": int(self.siting_result.feasible.sum()),
+                # Where a pond may *not* go, and how much of that veto was
+                # actually available. A reader needs to know whether existing
+                # tanks and rivers were ruled out or merely unchecked.
+                "exclusions": (None if self.exclusions is None else self.exclusions.as_dict()),
             },
             "environment": self.enrichment.as_dict(),
             "recommended_site": recommended,
             "candidate_sites": self.sites,
             "warnings": self.warnings,
         }
+        # A plain-language reading of the recommendation (FR-14), generated from
+        # the values just computed. Deterministic templates, no language model:
+        # the same analysis must always produce the same words, and every clause
+        # has to trace to a named field.
+        body["explanation"] = explain.explain_analysis(body)
         # Attached here rather than by the endpoint. It used to be the caller's
         # job, and the async path did not know to do it -- so an analysis run as
         # a job came back with no contours at all, which emptied the map's
@@ -235,6 +245,9 @@ def analyze_contour_map(
         ),
     )
     availability = enrichment.availability_grid()
+    # The hard veto on where a pond may go: existing tanks, rivers, buildings,
+    # roads. Built here because it needs the flow grid for its terrain fallback.
+    exclusions = enrichment.siting_exclusions(dem, flow)
 
     result = stage(
         "siting",
@@ -250,6 +263,7 @@ def analyze_contour_map(
             min_separation_m=opts.min_separation_m,
             min_depression_depth_m=opts.min_depression_depth_m,
             availability=availability,
+            excluded=exclusions.mask,
             layers_used=enrichment.layers_used,
             layers_unavailable=enrichment.layers_unavailable,
             tier=enrichment.tier,
@@ -293,6 +307,7 @@ def analyze_contour_map(
         sites=sites,
         elapsed_s=time.perf_counter() - t_total,
         stage_timings=timings,
+        exclusions=exclusions,
         options=opts,
         source_filename=filename,
         source_bytes=len(data),
@@ -346,7 +361,14 @@ def _site_payload(
     payload["terrain"] = terrain
 
     payload["runoff"] = _runoff_payload(catchment, enrichment)
-    payload["pond"] = _pond_payload(dem, site, payload["runoff"], buildable)
+    payload["pond"] = _pond_payload(
+        dem,
+        site,
+        payload["runoff"],
+        buildable,
+        enrichment=enrichment,
+        catchment_area_m2=catchment.area_m2,
+    )
     return payload
 
 
@@ -440,6 +462,8 @@ def _pond_payload(
     site: siting.CandidateSite,
     runoff: dict[str, Any] | None,
     buildable: npt.NDArray[np.bool_],
+    enrichment: Enrichment | None = None,
+    catchment_area_m2: float | None = None,
 ) -> dict[str, Any]:
     """Pond geometry and capacity for this site."""
     annual_m3: float | None = None
@@ -471,7 +495,59 @@ def _pond_payload(
             "not the extent of the scoring cluster."
         ),
     }
+    body["water_balance"] = _water_balance_payload(design, runoff, enrichment, catchment_area_m2)
     return body
+
+
+def _water_balance_payload(
+    design: Any,
+    runoff: dict[str, Any] | None,
+    enrichment: Enrichment | None,
+    catchment_area_m2: float | None,
+) -> dict[str, Any]:
+    """Month-by-month storage for this pond (FR-13).
+
+    Capacity says how much it holds; this says whether there is water in April,
+    which is the question a village actually asks. Reported as unavailable rather
+    than approximated when an input is missing -- a balance without evaporation
+    would overstate how long the pond lasts, which is the wrong direction to be
+    wrong in.
+    """
+    if not runoff or not runoff.get("available") or catchment_area_m2 is None:
+        return {"available": False, "reason": "needs a runoff estimate for the catchment"}
+
+    monthly_runoff = runoff.get("monthly_mean_runoff_mm")
+    et0 = None
+    soil_group = None
+    if enrichment is not None and enrichment.rainfall is not None:
+        et0 = enrichment.rainfall.et0_monthly_mm
+    if runoff.get("curve_number"):
+        soil_group = runoff["curve_number"].get("hydrologic_soil_group")
+
+    if not monthly_runoff or not et0:
+        return {
+            "available": False,
+            "reason": (
+                "needs monthly runoff and reference evapotranspiration; ET0 comes "
+                "with the rainfall layer, so this is unavailable at a degraded tier"
+            ),
+        }
+
+    try:
+        balance = water_balance.simulate(
+            monthly_runoff_mm=list(monthly_runoff),
+            catchment_area_m2=catchment_area_m2,
+            monthly_et0_mm=list(et0),
+            bottom_length_m=design.bottom_length_m,
+            bottom_width_m=design.bottom_width_m,
+            depth_m=design.depth_m,
+            side_slope=design.side_slope_h_per_v,
+            capacity_m3=design.gross_capacity_m3,
+            soil_group=soil_group,
+        )
+    except ValueError as exc:
+        return {"available": False, "reason": str(exc)}
+    return {"available": True, **balance.as_dict()}
 
 
 def _cell_lonlat(dem: DemGrid, row: int, col: int) -> tuple[float, float]:

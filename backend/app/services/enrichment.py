@@ -62,6 +62,12 @@ class Enrichment:
     #: whenever `rainfall` is: `rainfall` is one source's daily series (SCS-CN
     #: cannot run on a blend), and this is the uncertainty around it.
     rainfall_ensemble: RainfallEnsemble | None = None
+    #: OpenStreetMap features for the window: existing tanks, rivers, buildings
+    #: and roads. A *second, independent* source alongside land cover, so losing
+    #: one does not leave the model free to recommend a pond in an existing tank
+    #: -- which it otherwise does, enthusiastically, because a tank scores
+    #: maximally on depression depth and flow accumulation.
+    osm: Any | None = None
     failures: list[dict[str, str]] = field(default_factory=list)
     elapsed_s: float = 0.0
     budget_s: float = 0.0
@@ -103,8 +109,61 @@ class Enrichment:
             return self.soil.hydrologic_soil_group, True
         return ASSUMED_HSG, False
 
+    @property
+    def water_exclusion(self) -> dict[str, Any]:
+        """Which sources could rule out an existing water body, and what it means.
+
+        This is reported rather than assumed because the failure is quiet and
+        serious: with neither source, siting recommends existing tanks -- they
+        maximise depression depth and flow accumulation, being places where water
+        already collects. The reader needs to know which protection was in force.
+
+        This is the reader-facing view, phrased for `explain.py`. The machine
+        audit of what was actually vetoed -- rivers, buildings and roads as well
+        as standing water -- is `siting_exclusions()`. Both are derived from the
+        same two booleans below, so they never disagree; only the vocabulary
+        differs ("none" here, "terrain-only" there, for the same state).
+        """
+        from_cover = self.land_cover is not None
+        from_osm = self.osm is not None
+        sources = [
+            name
+            for name, present in (("land cover", from_cover), ("OpenStreetMap", from_osm))
+            if present
+        ]
+        if from_cover and from_osm:
+            note = (
+                "Existing water bodies were excluded using two independent "
+                "sources, so a site cannot be an already-built tank or an open "
+                "watercourse."
+            )
+        elif sources:
+            note = (
+                f"Existing water bodies were excluded using {sources[0]} only. "
+                "That source is not exhaustive, so check the recommended site is "
+                "not an existing tank before acting on it."
+            )
+        else:
+            note = (
+                "**Existing water bodies could not be excluded at all.** Neither "
+                "land cover nor OpenStreetMap was available, and terrain alone "
+                "cannot tell a good pond site from a pond that is already there "
+                "-- both are depressions where water collects. Verify on imagery "
+                "that the recommended site is dry ground."
+            )
+        return {
+            "sources": sources,
+            "confidence": "high" if len(sources) == 2 else ("partial" if sources else "none"),
+            "note": note,
+        }
+
     def availability_grid(self) -> npt.NDArray[np.float32] | None:
-        """Per-cell buildability from land cover, 0-1, or None if unavailable."""
+        """Per-cell buildability from land cover, 0-1, or None if unavailable.
+
+        Land cover only. The wider veto -- existing tanks, rivers, buildings,
+        roads -- is `siting_exclusions()`, which needs the flow grid and so
+        cannot be computed here.
+        """
         if self.land_cover is None:
             return None
         codes = self.land_cover.codes
@@ -113,6 +172,22 @@ class Enrichment:
             out[codes == code] = score
         return out
 
+    def siting_exclusions(self, dem: Any, flow: Any | None = None) -> Any:
+        """Everywhere a pond centre must not go, from whatever sources answered.
+
+        Terrain scores where water *collects*, which is exactly where an existing
+        tank is and exactly where a river runs. Without this veto, three of five
+        recommended sites on the sample sheet landed in permanent water.
+        """
+        from app.services import exclusions
+
+        return exclusions.build(
+            dem,
+            osm=self.osm,
+            land_cover_codes=None if self.land_cover is None else self.land_cover.codes,
+            flow_accumulation=None if flow is None else flow.accumulation,
+        )
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "analysis_tier": self.tier,
@@ -120,6 +195,7 @@ class Enrichment:
             "layers_used": self.layers_used,
             "layers_unavailable": self.layers_unavailable,
             "provider_failures": self.failures,
+            "water_exclusion": self.water_exclusion,
             "enrichment_elapsed_s": round(self.elapsed_s, 2),
             "enrichment_budget_s": self.budget_s,
             "enrichment_skipped": self.skipped,
@@ -208,10 +284,25 @@ def fetch_enrichment(
         # response says which was used.
         return fetch_ensemble(lon, lat, years=rainfall_years)
 
+    def _water() -> Any:
+        """The OSM context for the window. Cheap: the window is disk-cached.
+
+        The *mask* is built later, in `siting_exclusions()`, because it needs the
+        flow grid for the terrain fallback and that is not known here.
+        """
+        from app.providers.vector import osm_cache
+        from app.providers.vector.overpass import fetch_osm_context
+
+        context, _cached = osm_cache.fetch_cached(
+            bounds.as_tuple(), cache_store, fetch=fetch_osm_context
+        )
+        return context
+
     jobs = {
         "soil_hydrologic_group": _soil,
         "land_use_land_cover": _cover,
         "rainfall": _rain,
+        "existing_water": _water,
     }
     # A timeout produces no exception to read the provider name off, and the
     # layer name is not an answer to "who was down?". Name the service.
@@ -219,6 +310,7 @@ def fetch_enrichment(
         "soil_hydrologic_group": "ISRIC SoilGrids",
         "land_use_land_cover": "ESA WorldCover",
         "rainfall": "Open-Meteo",
+        "existing_water": "OpenStreetMap / Overpass",
     }
     pool = ThreadPoolExecutor(max_workers=len(jobs))
     futures = {name: pool.submit(fn) for name, fn in jobs.items()}
@@ -253,6 +345,8 @@ def fetch_enrichment(
                 result.soil = value  # type: ignore[assignment]
             elif name == "land_use_land_cover":
                 result.land_cover = value  # type: ignore[assignment]
+            elif name == "existing_water":
+                result.osm = value
             else:
                 # The futures dict is heterogeneous, so `value` is typed `object`;
                 # the key is what says which provider it came from.

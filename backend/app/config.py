@@ -43,17 +43,26 @@ class Settings(BaseSettings):
     COG_STORE_PATH: str = "/data/cache"
     TITILER_ENDPOINT: str = "http://titiler:8000"
 
-    # ── provider credentials ─────────────────────────────────────────────────
-    # NOTE: none of these are required to run the mandatory pipeline. The DEM
-    # comes from the Copernicus GLO-30 AWS Open Data bucket, which needs no
-    # credential at all (HLD 4.2 A1). Each key below unlocks an *enrichment*.
-    OPENTOPOGRAPHY_API_KEY: str = ""  # optional: SRTM/NASADEM/AW3D30 variety
-    DATA_GOV_IN_API_KEY: str = ""  # optional: official IMD district rainfall
-    # Ring 2 (M8/M9) -- absent is fine; adapters report NotConfigured
-    BHUVAN_TOKEN: str = ""
-    BHOONIDHI_API_KEY: str = ""
-    COPERNICUS_CLIENT_ID: str = ""
-    COPERNICUS_CLIENT_SECRET: str = ""
+    # ── provider credentials: there are none ─────────────────────────────────
+    # This project runs entirely on keyless open data, and that is a deliberate
+    # constraint rather than a stage it has not reached yet.
+    #
+    # Five credential fields used to live here -- OpenTopography, data.gov.in,
+    # Bhuvan, Bhoonidhi and Copernicus Data Space -- for the ISRO-integration and
+    # ML phases (M8/M9). Those phases were never built, no code ever read the
+    # values, and every capability they would have added already has a working
+    # keyless source in production:
+    #
+    #   land cover   ESA WorldCover 10 m (open S3)      instead of Bhuvan LULC
+    #   elevation    the uploaded contour sheet, and    instead of CartoDEM
+    #                Copernicus GLO-30 (AWS Open Data)
+    #   rainfall     Open-Meteo ERA5-Land + NASA POWER  instead of IMD via OGD
+    #                (two independent 30-year reanalyses, cross-checked)
+    #
+    # Keeping empty placeholders made `/health/ready` report five "missing: KEY"
+    # lines that read as problems while describing features that do not exist.
+    # Configuration for something the code does not do is worse than no
+    # configuration, so it is gone.
 
     # ── analysis behaviour ───────────────────────────────────────────────────
     MAX_AOI_KM2: float = 100.0
@@ -92,19 +101,19 @@ class Settings(BaseSettings):
         return [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
 
     # ── feature gating ───────────────────────────────────────────────────────
-    #: What each capability needs. Checked on demand, not at startup, so the app
-    #: still boots (and /health still answers) with Ring 2 keys absent.
+    #: What each capability needs. Every entry is an empty tuple, because every
+    #: data source this system uses is keyless -- and the mechanism is kept
+    #: rather than deleted so that adding a gated capability later is a one-line
+    #: change with the reporting already wired through `/health/ready`.
     #: ClassVar, not a field: this is a constant of the code, and must not be
     #: overridable from the environment.
     FEATURE_REQUIREMENTS: ClassVar[dict[str, tuple[str, ...]]] = {
-        # Empty tuple => always available. The primary DEM source is an open
-        # S3 bucket, so terrain acquisition has no credential dependency.
         "dem_acquisition": (),
-        "dem_alternate_products": ("OPENTOPOGRAPHY_API_KEY",),
-        "imd_district_rainfall": ("DATA_GOV_IN_API_KEY",),
-        "bhuvan_layers": ("BHUVAN_TOKEN",),
-        "bhoonidhi_cartodem": ("BHOONIDHI_API_KEY",),
-        "sentinel2_ndwi": ("COPERNICUS_CLIENT_ID", "COPERNICUS_CLIENT_SECRET"),
+        "contour_map_ingest": (),
+        "land_cover": (),
+        "soil": (),
+        "rainfall_reanalysis": (),
+        "osm_features": (),
     }
 
     def missing_for(self, feature: str) -> list[str]:
