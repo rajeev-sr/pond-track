@@ -18,12 +18,21 @@ cannot go in Redis alongside the job record.
 
 from __future__ import annotations
 
+import os
 import threading
 import uuid
 from typing import Any
 
 #: Enough for a session's worth of uploads; each entry holds a full DEM grid.
-CACHE_LIMIT = 16
+#:
+#: Overridable because "enough" depends on how much memory there is, and 16 live
+#: DEM grids is a lot of it. The compose stack has room; a 512 MB container does
+#: not, and there the cost is not a slow cache -- it is the OOM killer taking
+#: uvicorn out mid-analysis, which surfaces in the browser as a bare 500 with no
+#: problem details. Lowering this trades away follow-up calls on older uploads:
+#: `dem_id` is what /hydrology/streams, terrain tiles, click-to-delineate and
+#: available-land look up, so only the last DEM_CACHE_LIMIT uploads stay live.
+CACHE_LIMIT = int(os.environ.get("DEM_CACHE_LIMIT", "16"))
 
 _entries: dict[str, dict[str, Any]] = {}
 _lock = threading.Lock()
