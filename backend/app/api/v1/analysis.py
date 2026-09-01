@@ -61,10 +61,17 @@ def _options_dict(opts: ContourAnalysisOptions) -> dict[str, Any]:
 async def start_analysis(
     background: BackgroundTasks,
     response: Response,
-    file: Annotated[UploadFile, File(description="Contour map as KML or KMZ.")],
     opts: Annotated[ContourAnalysisOptions, Depends(_options_form)],
+    contour_map: Annotated[
+        UploadFile | None, File(description="Contour map, KML or KMZ. Preferred field name.")
+    ] = None,
+    file: Annotated[
+        UploadFile | None, File(description="Accepted alias for `contour_map`.")
+    ] = None,
 ) -> Any:
-    data, filename = await _read_upload(file)
+    from app.api.v1.contour import _one_upload
+
+    data, filename = await _read_upload(_one_upload(contour_map, file))
     job_id = uuid.uuid4().hex
 
     from app.workers.tasks import worker_available

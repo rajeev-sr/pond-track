@@ -344,7 +344,6 @@ def _parse_weights(raw: str | None) -> dict[str, float] | None:
 async def analyze_suitability(
     background: BackgroundTasks,
     response: Response,
-    file: Annotated[UploadFile, File(description="Contour map as KML or KMZ.")],
     opts: Annotated[ContourAnalysisOptions, Depends(_options_form)],
     weights_json: Annotated[
         str | None,
@@ -356,11 +355,18 @@ async def analyze_suitability(
             )
         ),
     ] = None,
+    contour_map: Annotated[
+        UploadFile | None, File(description="Contour map, KML or KMZ. Preferred field name.")
+    ] = None,
+    file: Annotated[
+        UploadFile | None, File(description="Accepted alias for `contour_map`.")
+    ] = None,
 ) -> Any:
     from app.api.v1.analysis import _options_dict
+    from app.api.v1.contour import _one_upload
 
     override = _parse_weights(weights_json)
-    data, filename = await _read_upload(file)
+    data, filename = await _read_upload(_one_upload(contour_map, file))
     options = _options_dict(opts)
     if override is not None:
         options["weights_override"] = override
