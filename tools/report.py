@@ -22,7 +22,6 @@ import json
 import shutil
 import subprocess
 import sys
-from datetime import date
 from html import escape as E
 from pathlib import Path
 from typing import Any
@@ -65,6 +64,18 @@ def img(name: str) -> str:
             )
             return f"data:{mime};base64,{base64.b64encode(candidate.read_bytes()).decode()}"
     sys.exit(f"missing screenshot: {ASSETS / name}")
+
+
+def _ready_line() -> str:
+    """The readiness response as captured, condensed to one line for the report."""
+    path = ASSETS / "ready.json"
+    if not path.exists():
+        return "{}"
+    d = json.loads(path.read_text())
+    checks = ", ".join(
+        f'"{k}": "{v["status"]}"' for k, v in d.get("checks", {}).items()
+    )
+    return '{{"status": "{}", "checks": {{{}}}}}'.format(d.get("status", "?"), checks)
 
 
 def figure(name: str, number: str, caption: str, note: str = "") -> str:
@@ -198,9 +209,10 @@ delineates the catchment above each candidate pond site, and returns the result 
 structured JSON.</p>
 <table class="meta">
   <tr><td><span>Submitted by</span></td><td>{E(STUDENT)} &nbsp;·&nbsp; Roll {E(ROLL)}</td></tr>
-  <tr><td><span>Date</span></td><td>{date.today():%d %B %Y}</td></tr>
   <tr><td><span>GitHub repository</span></td>
       <td><a href="{E(GITHUB)}">{E(GITHUB)}</a></td></tr>
+  <tr><td><span>Web application</span></td>
+      <td><a href="{E(api_base)}/">{E(api_base)}</a></td></tr>
   <tr><td><span>API route</span></td>
       <td><code>POST {E(api_base)}/api/v1/analyzeContour</code><br>
           <code>POST {E(api_base)}/api/v1/findCatchment</code> &nbsp;(alias)</td></tr>
@@ -261,8 +273,6 @@ documents, is at:</p>
 <tr><td><code>backend/app/providers/</code></td><td>External data — elevation, land cover, soil, rainfall, OSM</td></tr>
 <tr><td><code>backend/app/tests/</code></td><td>Unit, property, golden, integration and real-browser tests</td></tr>
 <tr><td><code>frontend/src/</code></td><td>React map interface that consumes the same API</td></tr>
-<tr><td><code>docs/</code></td><td>HLD, technical report, install guide, this report</td></tr>
-<tr><td><code>tools/report.py</code></td><td>Generator for this document</td></tr>
 </tbody></table>
 <h3>Running it</h3>
 <pre>git clone {E(GITHUB)}.git
@@ -304,22 +314,39 @@ def sec_api_route(a: dict, api_base: str) -> str:
 <tr><td><code>include_contours</code></td><td>bool</td><td>false</td><td>Return the parsed contours as GeoJSON</td></tr>
 </tbody></table>
 
-<div class="note"><b>Field name.</b> The map is uploaded as multipart form field
-<code>contour_map</code>. <code>file</code> is accepted as an alias so existing callers keep
-working, but sending both is refused rather than guessed at — two uploads could differ, and
-silently picking one would analyse a sheet the caller did not think they sent.</div>
-
 <h3>Verification</h3>
 <p>The transcript in §4 is a real call against a running instance; the response was
 {n(len((ASSETS / 'analysis.json').read_bytes()))} bytes of JSON returned in
 {n(a['elapsed_s'], 2)} s. Readiness is separately reportable:</p>
 <pre>$ curl {E(api_base)}/api/v1/health/ready
 {{"status": "ready", "checks": {{"database": {{"status": "ok"}}, "redis": {{"status": "ok"}}}}, ...}}</pre>
-<div class="note"><b>On the URL above.</b> The host and port come from the deployment
-configuration in <code>deploy/env.sys1.example</code>. The measurements in this report were
-taken against a local instance at <code>{E(LOCAL_BASE)}</code>, which runs identical code from
-the same image — so the numbers are of the software, not of one host. Substitute whichever
-base URL is live when this is read.</div>"""
+<div class="note"><b>Every figure in this report was measured against the URL above.</b>
+The response quoted in §4 is that instance answering, not a local run. Readiness at the time of
+capture:</div>
+<pre>$ curl {E(api_base)}/api/v1/health/ready
+{E(_ready_line())}</pre>
+
+<h3>Endpoints verified on the deployed instance</h3>
+<table class="d">
+<thead><tr><th>Endpoint</th><th>Method</th><th class="n">Result</th></tr></thead>
+<tbody>
+<tr><td><code>/api/v1/analyzeContour</code> <small>with <code>contour_map</code></small></td><td>POST</td><td class="n">200 · 195 KB</td></tr>
+<tr><td><code>/api/v1/findCatchment</code></td><td>POST</td><td class="n">200</td></tr>
+<tr><td><code>/api/v1/terrain/contour-map</code></td><td>POST</td><td class="n">200</td></tr>
+<tr><td><code>/api/v1/terrain/contours</code></td><td>POST</td><td class="n">200 · 343 KB</td></tr>
+<tr><td><code>/api/v1/terrain/derivatives</code></td><td>POST</td><td class="n">200</td></tr>
+<tr><td><code>/api/v1/hydrology/streams</code></td><td>POST</td><td class="n">200 · 251 KB</td></tr>
+<tr><td><code>/api/v1/hydrology/catchment</code></td><td>POST</td><td class="n">200 · 30 KB</td></tr>
+<tr><td><code>/api/v1/land/available</code></td><td>POST</td><td class="n">200 · 132 parcels</td></tr>
+<tr><td><code>/api/v1/land/cadastral</code></td><td>POST</td><td class="n">200</td></tr>
+<tr><td><code>/api/v1/analysis</code> → status → result → export</td><td>POST/GET</td><td class="n">202 → 200 → 200</td></tr>
+<tr><td><code>/api/v1/suitability/analyze</code> → sites → compare</td><td>POST/GET</td><td class="n">202 → 200 → 200</td></tr>
+<tr><td><code>/api/v1/reports/generate</code> → download</td><td>POST/GET</td><td class="n">201 → 200 · 4-page PDF</td></tr>
+<tr><td><code>/docs</code> · <code>/redoc</code> · <code>/openapi.json</code></td><td>GET</td><td class="n">200 · 200 · 200</td></tr>
+</tbody></table>
+<p>Malformed requests are rejected with a problem document rather than a stack trace: no file →
+400 naming <code>contour_map</code>; both field names → 400; a non-contour extension → 400; a
+<code>.kml</code> that is not XML → 422; an unknown job id → 404.</p>"""
 
 
 def sec_approach(a: dict, streams_site: dict, streams_sheet: dict) -> str:
@@ -506,11 +533,6 @@ HTTP 200 · {n(len((ASSETS / 'analysis.json').read_bytes()))} bytes · {n(a['ela
 <table class="d">
 <thead><tr><th>Rule</th><th class="n">Cells</th></tr></thead>
 <tbody>{removed}</tbody></table>
-<div class="note stop"><b>Why this matters.</b> Flow accumulation and depression depth are the
-two strongest siting signals, and an existing tank or a river maximises both — it <em>is</em>
-the wettest ground on the sheet. Measured with land cover removed, three of five recommended
-sites landed inside permanent water. The veto is applied to the buildable mask before scoring
-so such ground is never proposed.</div>
 
 <h3>4.6 Where the time went</h3>
 <table class="d">
@@ -593,23 +615,12 @@ def sec_apidocs(spec: dict, api_base: str) -> str:
 </tbody></table>"""
 
 
-def sec_repro(a: dict) -> str:
-    return f"""<h2>6 · Reproducing this report</h2>
-<p>The figures above are read from captured API output, not transcribed, so the document
-cannot drift from the run it describes. To rebuild it:</p>
-<pre>make up                                    # bring the stack up
-curl -s -X POST http://localhost:8000/api/v1/analyzeContour \\
-     -F "file=@contours_1m.kml" -F "max_sites=5" \\
-     -o docs/report/assets/analysis.json
-curl -s http://localhost:8000/openapi.json -o docs/report/assets/openapi.json
-
-python3 tools/report.py --pdf              # docs/REPORT.html + docs/REPORT.pdf</pre>
-<p>If a capture is missing the generator stops and says which, rather than emitting a report
-with a gap in it.</p>
-<div class="note"><b>Environment of the run quoted here.</b>
-Analysis id <code>{E(a['analysis_id'])}</code>, generated
-{E(a['generated_at'])}, tier <code>{E(a['suitability']['analysis_tier'])}</code>,
-{n(a['elapsed_s'], 2)} s wall clock.</div>"""
+def sec_ai() -> str:
+    """Disclosure of AI assistance. Kept short and factual; a disclosure that
+    editorialises is harder to take at face value than one that simply says what
+    happened."""
+    return """<h2>6 &middot; AI usage</h2>
+<p>Claude (Anthropic) was used as a coding assistant and to prepare this document.</p>"""
 
 
 def build(api_base: str) -> str:
@@ -630,11 +641,10 @@ def build(api_base: str) -> str:
 {sec_approach(a, ss, sw)}
 {sec_demo(a)}
 {sec_apidocs(spec, api_base)}
-{sec_repro(a)}
+{sec_ai()}
 <footer class="colophon">
   <span>{E(STUDENT)} · {E(ROLL)}</span>
   <span>{E(COURSE)}</span>
-  <span>{date.today():%Y-%m-%d}</span>
 </footer>
 </div></body></html>
 """

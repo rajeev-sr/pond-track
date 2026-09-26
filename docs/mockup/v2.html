@@ -1,0 +1,1207 @@
+<!doctype html>
+<html lang="en" data-plate="paper">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Contour — survey plate redesign</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,300..600;1,6..72,300..500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+/* ═══════════════════════════════════════════════════════════════════════════
+   CONTOUR — "survey plate"
+   The interface borrows the conventions of an engineering survey drawing:
+   paper ground, ink hairlines, marginal section numbers, corner ticks, a title
+   block carrying scale and north, figures numbered as plates. The map is a
+   cartographic sheet rather than a dark dashboard, because the artefact this
+   tool replaces is a drawing, not a console.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+:root {
+  --paper:    #f6f3ec;
+  --paper-2:  #efeade;
+  --paper-3:  #e7e0d0;
+  --ink:      #1b1e1c;
+  --ink-2:    #454a45;
+  --ink-3:    #6e746c;
+  --rule:     #cdc5b3;
+  --rule-2:   #b6ac95;
+  --water:    #1f5f80;
+  --water-2:  #3d87ad;
+  --water-bg: #e2ecf1;
+  --earth:    #a2551f;
+  --earth-bg: #f5e7db;
+  --veg:      #4a6b34;
+  --veg-bg:   #e9eee1;
+  --alert:    #96331f;
+  --alert-bg: #f7e3de;
+  --contour:  #b08a63;
+  color-scheme: light;
+}
+html[data-plate="linen"] {
+  --paper:    #14161a;
+  --paper-2:  #1b1f25;
+  --paper-3:  #232830;
+  --ink:      #eae6dc;
+  --ink-2:    #b6b1a4;
+  --ink-3:    #8b877c;
+  --rule:     #343a44;
+  --rule-2:   #4a5260;
+  --water:    #6fb6d8;
+  --water-2:  #8fcbe6;
+  --water-bg: #16303c;
+  --earth:    #d08a4e;
+  --earth-bg: #33220f;
+  --veg:      #8fb069;
+  --veg-bg:   #1e2717;
+  --alert:    #e0705a;
+  --alert-bg: #341a15;
+  --contour:  #7a6247;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font: 400 15px/1.62 "IBM Plex Sans", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+/* Faint drafting grid — the ground the whole thing is drawn on. */
+body::before {
+  content: ""; position: fixed; inset: 0; z-index: 0; pointer-events: none;
+  background-image:
+    linear-gradient(to right, var(--rule) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--rule) 1px, transparent 1px);
+  background-size: 28px 28px;
+  opacity: .22;
+}
+#shell { position: relative; z-index: 1; }
+
+h1,h2,h3 { margin: 0; font-family: Newsreader, Georgia, serif; font-weight: 400; letter-spacing: -0.012em; line-height: 1.14; }
+h1 { font-size: 54px; }
+h2 { font-size: 33px; }
+h3 { font-size: 20px; }
+p { margin: 0; }
+a { color: var(--water); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+
+.mono { font-family: "IBM Plex Mono", monospace; }
+.fig  { font-family: "IBM Plex Mono", monospace; font-variant-numeric: tabular-nums; }
+.sheet { max-width: 1240px; margin: 0 auto; padding: 0 34px; }
+
+/* ── label: the small caps stamp used all over a drawing ────────────────── */
+.stamp {
+  font-family: "IBM Plex Mono", monospace; font-size: 10.5px; font-weight: 500;
+  letter-spacing: .16em; text-transform: uppercase; color: var(--ink-3);
+}
+
+/* ── masthead ───────────────────────────────────────────────────────────── */
+.masthead {
+  position: sticky; top: 0; z-index: 60;
+  display: flex; align-items: stretch;
+  border-bottom: 1px solid var(--rule-2);
+  background: color-mix(in srgb, var(--paper) 92%, transparent);
+  backdrop-filter: blur(8px);
+}
+.mh-brand {
+  display: flex; align-items: center; gap: 10px;
+  padding: 0 22px; border-right: 1px solid var(--rule-2);
+  font-family: Newsreader, serif; font-size: 21px; letter-spacing: -0.01em;
+}
+.mh-nav { display: flex; }
+.mh-nav button {
+  border: 0; border-right: 1px solid var(--rule); background: none; cursor: pointer;
+  font-family: "IBM Plex Mono", monospace; font-size: 11px; letter-spacing: .13em;
+  text-transform: uppercase; color: var(--ink-3); padding: 17px 20px 15px;
+}
+.mh-nav button:hover { background: var(--paper-2); color: var(--ink); }
+.mh-nav button[aria-current] { background: var(--ink); color: var(--paper); }
+.mh-spacer { flex: 1; border-right: 1px solid var(--rule); }
+.mh-act { display: flex; align-items: center; gap: 12px; padding: 0 20px; }
+.mh-act a, .mh-act button {
+  font-family: "IBM Plex Mono", monospace; font-size: 11px; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--ink-2); background: none; border: 0;
+  cursor: pointer; text-decoration: none;
+}
+.mh-act a:hover, .mh-act button:hover { color: var(--water); }
+
+/* ── buttons ────────────────────────────────────────────────────────────── */
+.act {
+  display: inline-flex; align-items: center; gap: 9px;
+  background: var(--ink); color: var(--paper); border: 1px solid var(--ink);
+  padding: 11px 20px; cursor: pointer; text-decoration: none;
+  font-family: "IBM Plex Mono", monospace; font-size: 11.5px; letter-spacing: .12em; text-transform: uppercase;
+}
+.act:hover { background: var(--water); border-color: var(--water); }
+.act.line { background: transparent; color: var(--ink); border-color: var(--rule-2); }
+.act.line:hover { background: transparent; border-color: var(--ink); color: var(--ink); }
+
+/* ── pages ──────────────────────────────────────────────────────────────── */
+.page { display: none; }
+.page.on { display: block; }
+
+/* ── the numbered section frame: marginal number + hairline + content ───── */
+.blk { display: grid; grid-template-columns: 96px 1fr; border-top: 1px solid var(--rule-2); }
+.blk > .mgn { padding: 30px 0 30px; border-right: 1px solid var(--rule); }
+.blk > .bdy { padding: 30px 0 46px 30px; min-width: 0; }
+.mgn .no { font-family: Newsreader, serif; font-size: 27px; color: var(--rule-2); line-height: 1; }
+.mgn .stamp { display: block; margin-top: 8px; writing-mode: vertical-rl; }
+
+/* ── opening statement ──────────────────────────────────────────────────── */
+.open { display: grid; grid-template-columns: 1.02fr 1fr; gap: 48px; padding: 54px 0 60px; align-items: start; }
+.aim { font-family: Newsreader, serif; font-size: 20px; line-height: 1.5; color: var(--ink-2); margin-top: 22px; max-width: 40ch; }
+.aim b { color: var(--ink); font-weight: 500; }
+.opener-meta { display: flex; gap: 26px; margin-top: 30px; padding-top: 20px; border-top: 1px solid var(--rule); }
+.opener-meta div { font-size: 13px; color: var(--ink-2); }
+.opener-meta .stamp { display: block; margin-bottom: 4px; }
+
+/* ── plate: a framed figure with corner ticks and a caption bar ─────────── */
+.plate { position: relative; border: 1px solid var(--rule-2); background: var(--paper); }
+.plate::before, .plate::after,
+.plate > .tick-l, .plate > .tick-r {
+  content: ""; position: absolute; width: 9px; height: 9px; border: 1px solid var(--ink); }
+.plate::before { top: -1px; left: -1px; border-right: 0; border-bottom: 0; }
+.plate::after  { top: -1px; right: -1px; border-left: 0; border-bottom: 0; }
+.plate > .tick-l { bottom: -1px; left: -1px; border-right: 0; border-top: 0; }
+.plate > .tick-r { bottom: -1px; right: -1px; border-left: 0; border-top: 0; }
+.plate svg { display: block; width: 100%; height: auto; }
+.plate-cap {
+  display: flex; justify-content: space-between; gap: 14px;
+  border-top: 1px solid var(--rule); padding: 9px 13px; background: var(--paper-2);
+}
+.plate-cap span { font-family: "IBM Plex Mono", monospace; font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-3); }
+
+/* ── the problem: a ledger of failure modes ─────────────────────────────── */
+.ledger { border-top: 1px solid var(--rule); }
+.ledger .row {
+  display: grid; grid-template-columns: 30px 1fr 1.25fr; gap: 22px;
+  padding: 20px 0; border-bottom: 1px solid var(--rule); align-items: start;
+}
+.ledger .k { font-family: "IBM Plex Mono", monospace; font-size: 12px; color: var(--rule-2); padding-top: 3px; }
+.ledger h3 { font-size: 18px; }
+.ledger p { font-size: 14px; color: var(--ink-2); }
+
+/* ── stage list (method overview) ───────────────────────────────────────── */
+.stages { display: grid; grid-template-columns: repeat(4, 1fr); border-left: 1px solid var(--rule); }
+.stages > div { border-right: 1px solid var(--rule); padding: 20px 18px 24px; }
+.stages .stamp { color: var(--water); }
+.stages h3 { font-size: 17px; margin: 10px 0 8px; }
+.stages p { font-size: 13.5px; color: var(--ink-2); }
+
+/* ── survey table ───────────────────────────────────────────────────────── */
+table.svy { width: 100%; border-collapse: collapse; }
+table.svy th {
+  font-family: "IBM Plex Mono", monospace; font-size: 10.5px; letter-spacing: .13em;
+  text-transform: uppercase; color: var(--ink-3); text-align: left;
+  padding: 8px 12px 8px 0; border-bottom: 1px solid var(--rule-2);
+}
+table.svy td { padding: 10px 12px 10px 0; border-bottom: 1px solid var(--rule); font-size: 14px; vertical-align: top; }
+table.svy .n, table.svy th.n { text-align: right; padding-right: 0;
+  font-family: "IBM Plex Mono", monospace; font-variant-numeric: tabular-nums; }
+table.svy tr:last-child td { border-bottom: 0; }
+table.svy td small { display: block; color: var(--ink-3); font-size: 12px; }
+
+/* ── readings: big figures set like a levelling book ───────────────────── */
+.readings { display: grid; grid-template-columns: repeat(4, 1fr); border-left: 1px solid var(--rule); }
+.readings > div { border-right: 1px solid var(--rule); padding: 16px 18px 20px; }
+.readings .v { font-family: Newsreader, serif; font-size: 38px; line-height: 1; margin-top: 10px; font-variant-numeric: tabular-nums; }
+.readings .v small { font-family: "IBM Plex Mono", monospace; font-size: 12px; letter-spacing: .06em; color: var(--ink-3); margin-left: 4px; }
+.readings .sub { font-size: 12.5px; color: var(--ink-3); margin-top: 7px; }
+
+/* ── note / annotation ──────────────────────────────────────────────────── */
+.note { border-left: 2px solid var(--water); background: var(--water-bg); padding: 14px 16px; font-size: 13.5px; color: var(--ink-2); }
+.note.warn { border-left-color: var(--earth); background: var(--earth-bg); }
+.note.stop { border-left-color: var(--alert); background: var(--alert-bg); }
+.note b { color: var(--ink); font-weight: 600; }
+
+.tag {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-family: "IBM Plex Mono", monospace; font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase;
+  padding: 3px 8px; border: 1px solid currentColor;
+}
+.tag.w { color: var(--water); } .tag.e { color: var(--earth); } .tag.v { color: var(--veg); } .tag.a { color: var(--alert); }
+
+/* ═════════════ WORKSPACE ═════════════ */
+/* 53px masthead + 29px review bar. Measured rather than guessed: at
+   100vh − 53px the sheet overflowed and took the title block with it. */
+.bench { display: grid; grid-template-columns: 268px 1fr 372px; height: calc(100vh - 82px); }
+.jobsheet { border-right: 1px solid var(--rule-2); background: var(--paper-2); overflow-y: auto; }
+.jobsheet section { border-bottom: 1px solid var(--rule); padding: 18px 20px 22px; }
+.jobsheet .stamp { display: block; margin-bottom: 14px; }
+.fld { margin-bottom: 14px; }
+.fld label { display: block; font-size: 12.5px; color: var(--ink-2); margin-bottom: 5px; }
+.fld .in {
+  width: 100%; background: var(--paper); border: 1px solid var(--rule-2); border-radius: 0;
+  padding: 8px 10px; font: inherit; font-size: 13.5px; color: var(--ink);
+}
+.fld .in::placeholder { color: var(--ink-3); }
+.fld .dropzone {
+  border: 1px dashed var(--rule-2); background: var(--paper);
+  padding: 20px 10px; text-align: center; font-size: 12.5px; color: var(--ink-3); cursor: pointer;
+}
+.fld .dropzone:hover { border-color: var(--water); color: var(--water); }
+.fld input[type=range] { width: 100%; accent-color: var(--water); }
+.pair { display: flex; justify-content: space-between; align-items: baseline; }
+.pair .rv { font-family: "IBM Plex Mono", monospace; font-size: 12.5px; color: var(--water); }
+.readback { display: grid; gap: 9px; }
+.readback .pair { font-size: 13px; color: var(--ink-2); }
+
+/* the drawing area */
+.drawing { position: relative; background: var(--paper); overflow: hidden; }
+.drawing > svg.sheetmap { width: 100%; height: 100%; display: block; }
+
+/* title block, bottom-right, as on a real plate */
+.titleblock {
+  position: absolute; right: 0; bottom: 0;
+  border-left: 1px solid var(--rule-2); border-top: 1px solid var(--rule-2);
+  background: color-mix(in srgb, var(--paper) 94%, transparent);
+  display: grid; grid-template-columns: repeat(3, minmax(84px, auto));
+}
+.titleblock div { padding: 8px 13px; border-right: 1px solid var(--rule); }
+.titleblock div:last-child { border-right: 0; }
+.titleblock .stamp { display: block; font-size: 9.5px; margin-bottom: 3px; }
+.titleblock .val { font-family: "IBM Plex Mono", monospace; font-size: 12px; }
+
+.legendbox {
+  position: absolute; left: 14px; bottom: 14px; width: 216px;
+  border: 1px solid var(--rule-2); background: color-mix(in srgb, var(--paper) 95%, transparent);
+}
+.legendbox > .stamp { display: block; padding: 9px 12px 8px; border-bottom: 1px solid var(--rule); }
+.legendbox .items { padding: 9px 12px 12px; }
+.lg { display: flex; align-items: center; gap: 9px; padding: 3px 0; font-size: 12.5px; }
+.lg .key { width: 20px; height: 0; border-top-width: 2px; border-top-style: solid; flex: none; }
+.lg .keyf { width: 13px; height: 11px; flex: none; border: 1px solid; }
+.lg.dim { color: var(--ink-3); }
+.lg .name { flex: 1; }
+.extent { display: flex; gap: 5px; margin: 7px 0 3px 29px; }
+.extent button {
+  font-family: "IBM Plex Mono", monospace; font-size: 10px; letter-spacing: .07em; text-transform: uppercase;
+  padding: 3px 7px; cursor: pointer; background: transparent;
+  border: 1px solid var(--rule-2); color: var(--ink-3); white-space: nowrap;
+}
+.extent button.on { border-color: var(--water); color: var(--water); background: var(--water-bg); }
+
+/* findings pane */
+.findings { border-left: 1px solid var(--rule-2); overflow-y: auto; background: var(--paper); }
+.f-tabs { display: flex; border-bottom: 1px solid var(--rule-2); position: sticky; top: 0; background: var(--paper); z-index: 4; }
+.f-tabs button {
+  flex: 1; border: 0; border-right: 1px solid var(--rule); background: none; cursor: pointer;
+  font-family: "IBM Plex Mono", monospace; font-size: 10px; letter-spacing: .09em; text-transform: uppercase;
+  color: var(--ink-3); padding: 13px 4px 11px; white-space: nowrap;
+}
+.f-tabs button:last-child { border-right: 0; }
+.f-tabs button.on { background: var(--ink); color: var(--paper); }
+.f-body { padding: 18px 18px 44px; }
+.f-pane { display: none; } .f-pane.on { display: block; }
+.f-body .stamp { display: block; margin: 22px 0 11px; }
+.f-body .stamp:first-child { margin-top: 0; }
+
+.rec { border: 1px solid var(--ink); }
+.rec .hd { display: flex; align-items: baseline; gap: 9px; padding: 11px 13px; border-bottom: 1px solid var(--rule); background: var(--paper-2); }
+.rec .hd .r { font-family: "IBM Plex Mono", monospace; font-size: 12px; color: var(--earth); }
+.rec .hd .k { font-size: 13.5px; }
+.rec .hd .s { margin-left: auto; font-family: Newsreader, serif; font-size: 22px; }
+.rec .bd { padding: 13px; }
+
+.wgt { display: grid; gap: 6px; }
+.wgt .r { display: grid; grid-template-columns: 116px 1fr 40px; gap: 9px; align-items: center; font-size: 12.5px; }
+.wgt .tr { display: block; height: 9px; background: var(--paper-3); }
+.wgt .fl { display: block; height: 9px; background: var(--water); }
+.wgt .n { text-align: right; font-family: "IBM Plex Mono", monospace; font-size: 11.5px; color: var(--ink-3); }
+
+.picklist tr { cursor: pointer; }
+.picklist tr:hover td { background: var(--paper-2); }
+.picklist tr.on td { background: var(--earth-bg); }
+
+/* ═════════════ METHOD ═════════════ */
+.method { display: grid; grid-template-columns: 210px 1fr; gap: 44px; padding: 40px 0 90px; align-items: start; }
+.index { position: sticky; top: 78px; }
+.index .stamp { display: block; margin-bottom: 12px; }
+.index a { display: block; font-size: 13px; color: var(--ink-2); padding: 6px 0 6px 13px; border-left: 1px solid var(--rule); text-decoration: none; }
+.index a.on { color: var(--water); border-left: 2px solid var(--water); font-weight: 500; }
+.prose > * + * { margin-top: 18px; }
+.prose h2 { margin-top: 44px; font-size: 28px; }
+.prose h2:first-child { margin-top: 0; }
+.prose h3 { margin-top: 26px; font-size: 18px; }
+.prose p { color: var(--ink-2); }
+.eq {
+  border-top: 1px solid var(--ink); border-bottom: 1px solid var(--rule);
+  padding: 16px 0; font-family: "IBM Plex Mono", monospace; font-size: 14px; color: var(--ink);
+  overflow-x: auto;
+}
+.eq .whence { display: block; font-family: "IBM Plex Sans", sans-serif; font-size: 12.5px; color: var(--ink-3); margin-top: 10px; }
+.src { font-size: 12.5px; color: var(--ink-3); font-style: italic; }
+ul.bul { margin: 0; padding-left: 18px; color: var(--ink-2); font-size: 14px; }
+ul.bul li + li { margin-top: 8px; }
+
+/* ═════════════ REFERENCE ═════════════ */
+.refgrid { display: grid; grid-template-columns: repeat(3, 1fr); border-left: 1px solid var(--rule); }
+.refgrid > a, .refgrid > div {
+  border-right: 1px solid var(--rule); border-bottom: 1px solid var(--rule);
+  padding: 22px 20px 26px; text-decoration: none; color: inherit; display: block;
+}
+.refgrid > a:hover { background: var(--paper-2); }
+.refgrid h3 { font-size: 18px; margin-bottom: 8px; }
+.refgrid p { font-size: 13.5px; color: var(--ink-2); }
+.refgrid .go { display: inline-block; margin-top: 13px; font-family: "IBM Plex Mono", monospace; font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--water); }
+
+/* ── colophon ───────────────────────────────────────────────────────────── */
+.colophon { border-top: 1px solid var(--ink); padding: 34px 0 46px; font-size: 13px; color: var(--ink-3); }
+.colophon .cols { display: grid; grid-template-columns: 1.7fr 1fr 1fr 1fr; gap: 26px; }
+.colophon .stamp { display: block; margin-bottom: 11px; }
+.colophon a { display: block; color: var(--ink-2); padding: 3px 0; text-decoration: none; font-size: 13px; }
+.colophon a:hover { color: var(--water); text-decoration: underline; }
+.colophon .foot { margin-top: 28px; padding-top: 16px; border-top: 1px solid var(--rule); display: flex; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
+
+.reviewbar {
+  border-bottom: 1px solid var(--rule-2); background: var(--paper-3);
+  font-family: "IBM Plex Mono", monospace; font-size: 10.5px; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--ink-3); padding: 7px 34px;
+}
+
+@media (max-width: 1120px) {
+  .open, .method, .colophon .cols { grid-template-columns: 1fr; }
+  .stages, .readings, .refgrid { grid-template-columns: 1fr 1fr; }
+  .bench { grid-template-columns: 1fr; height: auto; }
+  .blk { grid-template-columns: 1fr; }
+  .blk > .mgn { border-right: 0; border-bottom: 1px solid var(--rule); padding-bottom: 12px; }
+  .blk > .bdy { padding-left: 0; }
+  .mgn .stamp { writing-mode: horizontal-tb; }
+  h1 { font-size: 38px; }
+}
+@media print {
+  .masthead, .reviewbar, .colophon, .index { display: none !important; }
+  .page { display: none !important; } #p-method { display: block !important; }
+  body::before { display: none; }
+  .method { grid-template-columns: 1fr; padding: 0; }
+}
+</style>
+</head>
+<body>
+<div id="shell">
+
+<div class="reviewbar">Design proposal · plate 0 of 4 · static mockup, figures taken from the verified sample run</div>
+
+<header class="masthead">
+  <span class="mh-brand">
+    <svg width="20" height="26" viewBox="0 0 20 26" fill="none" aria-hidden="true">
+      <path d="M1 24c3.2-3.4 5.4-6.6 8-7.6" stroke="var(--contour)" stroke-width="1.3"/>
+      <path d="M1 19.5c4-3.6 6.6-6.4 10-7.2" stroke="var(--contour)" stroke-width="1.3"/>
+      <path d="M1 15c4.6-3.8 7.6-6.2 12-6.8" stroke="var(--contour)" stroke-width="1.3"/>
+      <path d="M1 10.5c5-4 8.6-6 14-6.4" stroke="var(--contour)" stroke-width="1.3"/>
+      <circle cx="12.5" cy="17.5" r="3" fill="var(--water)"/>
+    </svg>
+    Contour
+  </span>
+  <nav class="mh-nav">
+    <button data-go="brief" aria-current="page">Brief</button>
+    <button data-go="bench">Workspace</button>
+    <button data-go="method">Method</button>
+    <button data-go="ref">Reference</button>
+  </nav>
+  <span class="mh-spacer"></span>
+  <span class="mh-act">
+    <a href="#" onclick="return false">API docs ↗</a>
+    <button id="flip">Linen</button>
+  </span>
+</header>
+
+<!-- ══════════════════════════ BRIEF ══════════════════════════ -->
+<div class="page on" id="p-brief">
+
+  <div class="sheet">
+    <div class="open">
+      <div>
+        <span class="stamp">The aim</span>
+        <h1 style="margin-top:14px">Where should this<br>village build its pond?</h1>
+        <p class="aim">A Gram Panchayat has a contour sheet and a budget. Contour answers the
+          question that sheet cannot: <b>which point on this land will hold water, how much
+          catchment feeds it, how much it will yield in a normal year, and how big the structure
+          should be.</b></p>
+        <div style="display:flex;gap:10px;margin-top:28px">
+          <button class="act" data-go="bench">Open the workspace</button>
+          <button class="act line" data-go="method">Read the method</button>
+        </div>
+        <div class="opener-meta">
+          <div><span class="stamp">Input</span>Contour survey · KML / KMZ</div>
+          <div><span class="stamp">Output</span>Ranked sites · catchment · yield · design</div>
+          <div><span class="stamp">Scale</span>Village, 1–10 km²</div>
+        </div>
+      </div>
+
+      <figure class="plate" style="margin:0">
+        <span class="tick-l"></span><span class="tick-r"></span>
+        <svg viewBox="0 0 620 380" aria-label="Long section through the proposed pond: falling valley, bund, impounded water and excavated floor">
+          <defs>
+            <pattern id="hatchw" width="7" height="7" patternTransform="rotate(45)" patternUnits="userSpaceOnUse">
+              <line x1="0" y1="0" x2="0" y2="7" stroke="var(--water-2)" stroke-width="1.1" opacity=".6"/>
+            </pattern>
+            <pattern id="hatche" width="6" height="6" patternTransform="rotate(-45)" patternUnits="userSpaceOnUse">
+              <line x1="0" y1="0" x2="0" y2="6" stroke="var(--earth)" stroke-width="1" opacity=".45"/>
+            </pattern>
+          </defs>
+
+          <g stroke="var(--rule)" stroke-width=".7">
+            <line x1="64" y1="60" x2="600" y2="60"/><line x1="64" y1="110" x2="600" y2="110"/>
+            <line x1="64" y1="160" x2="600" y2="160"/><line x1="64" y1="210" x2="600" y2="210"/>
+            <line x1="64" y1="260" x2="600" y2="260"/><line x1="64" y1="310" x2="600" y2="310"/>
+          </g>
+          <g font-size="9" fill="var(--ink-3)" text-anchor="end" font-family="IBM Plex Mono">
+            <text x="56" y="63">282</text><text x="56" y="113">280</text><text x="56" y="163">278</text>
+            <text x="56" y="213">276</text><text x="56" y="263">274</text><text x="56" y="313">272</text>
+          </g>
+          <text x="22" y="196" font-size="9" fill="var(--ink-3)" letter-spacing="1.4"
+                transform="rotate(-90 22 196)" font-family="IBM Plex Mono">REDUCED LEVEL, m</text>
+
+          <!-- excavated deepening, below the natural valley floor -->
+          <path d="M268 175 L438 244 L430 272 L300 272 Z" fill="url(#hatche)"/>
+          <!-- water impounded behind the bund: bounded above by FSL, below by ground -->
+          <path d="M232 160 L438 160 L438 244 Z" fill="url(#hatchw)"/>
+          <path d="M268 175 L438 244 L430 272 L300 272 Z" fill="url(#hatchw)" fill-opacity=".5"/>
+
+          <!-- full supply level -->
+          <line x1="224" y1="160" x2="452" y2="160" stroke="var(--water)" stroke-width="1.7"/>
+          <g stroke="var(--water)" stroke-width="1.1">
+            <line x1="246" y1="153" x2="258" y2="153"/><line x1="264" y1="149" x2="272" y2="149"/>
+          </g>
+          <text x="252" y="145" font-size="10" fill="var(--water)" font-family="IBM Plex Mono">FSL 278.00</text>
+
+          <!-- original ground: a valley falling left to right -->
+          <path d="M64 88 L232 160 L438 244 L520 272 L600 302" fill="none"
+                stroke="var(--ink)" stroke-width="2"/>
+          <!-- excavated profile, dashed as on a drawing -->
+          <path d="M268 175 L300 272 L430 272 L438 244" fill="none"
+                stroke="var(--earth)" stroke-width="1.3" stroke-dasharray="5 3"/>
+
+          <!-- bund across the valley -->
+          <path d="M438 244 L462 130 L496 130 L520 272 Z" fill="var(--paper-3)"
+                stroke="var(--ink)" stroke-width="1.6"/>
+          <line x1="462" y1="130" x2="496" y2="130" stroke="var(--ink)" stroke-width="2.6"/>
+
+          <!-- depth dimension, FSL to excavated floor -->
+          <g stroke="var(--ink-2)" stroke-width="1">
+            <line x1="352" y1="160" x2="352" y2="272"/>
+            <path d="M348 165 L352 160 L356 165" fill="none"/>
+            <path d="M348 267 L352 272 L356 267" fill="none"/>
+          </g>
+          <rect x="358" y="205" width="54" height="15" fill="var(--paper)"/>
+          <text x="360" y="216" font-size="11" fill="var(--ink)" font-family="IBM Plex Mono">4.50 m</text>
+
+          <!-- annotations -->
+          <g stroke="var(--ink-3)" stroke-width=".9" fill="none">
+            <path d="M479 130 L479 100 L520 100"/>
+            <path d="M348 272 L372 320 L404 320"/>
+          </g>
+          <g font-size="10" fill="var(--ink-2)" font-family="IBM Plex Sans">
+            <text x="600" y="97" text-anchor="end">bund crest RL 281.20</text>
+            <text x="408" y="323">excavated to RL 273.50</text>
+          </g>
+          <text x="64" y="348" font-size="9.5" fill="var(--ink-3)" font-family="IBM Plex Mono">CH 0</text>
+          <text x="600" y="348" font-size="9.5" fill="var(--ink-3)" text-anchor="end" font-family="IBM Plex Mono">CH 410 m</text>
+        </svg>
+        <div class="plate-cap">
+          <span>Plate 1 — long section, recommended site</span>
+          <span>V exagg. ×8</span>
+        </div>
+      </figure>
+    </div>
+  </div>
+
+  <div class="sheet">
+    <div class="blk">
+      <div class="mgn"><div class="no">01</div><span class="stamp">Problem</span></div>
+      <div class="bdy">
+        <h2 style="max-width:22ch">Four ways a village pond is put in the wrong place.</h2>
+        <p style="color:var(--ink-2);margin-top:14px;max-width:62ch">Siting is usually settled by
+          eye, or by an engineer's single visit. The contour sheet that already exists for the
+          village holds the answer, but reading catchment area and storage off it by hand is slow
+          and rarely done. Each failure below wastes public money in a different way.</p>
+
+        <div class="ledger" style="margin-top:26px">
+          <div class="row">
+            <div class="k">1.1</div>
+            <div><h3>Too little catchment</h3></div>
+            <div><p>The structure is built, and never fills. Contributing area was never measured —
+              only guessed from the look of the ground.</p></div>
+          </div>
+          <div class="row">
+            <div class="k">1.2</div>
+            <div><h3>Water already there</h3></div>
+            <div><p>The chosen spot is an existing tank or a river bed. It <em>is</em> the wettest
+              ground on the sheet, which is exactly why a terrain-only judgement points at it.</p></div>
+          </div>
+          <div class="row">
+            <div class="k">1.3</div>
+            <div><h3>Storage that cannot be built</h3></div>
+            <div><p>A capacity is promised that the ground will not give without excavation deeper
+              than the budget, or a bund longer than the land available.</p></div>
+          </div>
+          <div class="row">
+            <div class="k">1.4</div>
+            <div><h3>No record of the reasoning</h3></div>
+            <div><p>When the pond underperforms, nothing on file says which assumptions were made,
+              so the next one repeats the mistake.</p></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="blk">
+      <div class="mgn"><div class="no">02</div><span class="stamp">Approach</span></div>
+      <div class="bdy">
+        <h2 style="max-width:24ch">From contour lines to a dimensioned proposal.</h2>
+        <p style="color:var(--ink-2);margin-top:14px;max-width:62ch">Four stages. Each one leaves an
+          artefact you can inspect and disagree with — a surface, a flow network, a ranking, a
+          design — rather than a single number to take on trust.</p>
+        <div class="stages" style="margin-top:26px">
+          <div><span class="stamp">Stage 01</span><h3>Surface</h3>
+            <p>Contour polylines are triangulated into a metric elevation grid, in the UTM zone the
+              sheet itself falls in.</p></div>
+          <div><span class="stamp">Stage 02</span><h3>Flow</h3>
+            <p>Depressions conditioned, flow directions assigned, accumulation traced — giving
+              channels, catchments and time of concentration.</p></div>
+          <div><span class="stamp">Stage 03</span><h3>Site</h3>
+            <p>Nine weighted criteria rank the buildable ground that survives the exclusions —
+              water, rivers, roads, buildings.</p></div>
+          <div><span class="stamp">Stage 04</span><h3>Design</h3>
+            <p>Stage–storage from the surface, yield from rainfall and soil, then depth, footprint,
+              cost and the constraint that binds.</p></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="blk">
+      <div class="mgn"><div class="no">03</div><span class="stamp">Result</span></div>
+      <div class="bdy">
+        <h2 style="max-width:24ch">One sheet, read end to end.</h2>
+        <p style="color:var(--ink-2);margin-top:14px;max-width:60ch">The bundled Durg survey —
+          1,355 contour lines over 1.9 km², reduced to a ranked proposal.</p>
+
+        <div class="readings" style="margin-top:26px">
+          <div><span class="stamp">Suitability</span>
+            <div class="v">82.7<small>/100</small></div>
+            <div class="sub">rank 1 of 25 candidates</div></div>
+          <div><span class="stamp">Catchment</span>
+            <div class="v">180.3<small>ha</small></div>
+            <div class="sub">Tc 65.1 min · relief 16.0 m</div></div>
+          <div><span class="stamp">Storage</span>
+            <div class="v">81,682<small>m³</small></div>
+            <div class="sub">4.50 m deep · 141 × 141 m</div></div>
+          <div><span class="stamp">Reliability</span>
+            <div class="v">12<small>/12 mo</small></div>
+            <div class="sub">holds water through the year</div></div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:1.15fr 1fr;gap:28px;margin-top:30px;align-items:start">
+          <div>
+            <span class="stamp" style="display:block;margin-bottom:12px">Why this site, and not another</span>
+            <table class="svy">
+              <thead><tr><th>Criterion</th><th class="n">Weight</th><th class="n">Contribution</th></tr></thead>
+              <tbody>
+                <tr><td>Flow accumulation</td><td class="n">0.200</td><td class="n">0.281</td></tr>
+                <tr><td>Depression depth</td><td class="n">0.133</td><td class="n">0.192</td></tr>
+                <tr><td>Land availability</td><td class="n">0.114</td><td class="n">0.140</td></tr>
+                <tr><td>Slope</td><td class="n">0.171</td><td class="n">0.139</td></tr>
+                <tr><td>Plan concavity</td><td class="n">0.076</td><td class="n">0.075</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div>
+            <span class="stamp" style="display:block;margin-bottom:12px">Ground ruled out first</span>
+            <table class="svy">
+              <tbody>
+                <tr><td>River or canal <small>50 m standoff</small></td><td class="n">53,843</td></tr>
+                <tr><td>Roads <small>20 m</small></td><td class="n">45,694</td></tr>
+                <tr><td>Water, by land cover</td><td class="n">36,597</td></tr>
+                <tr><td>Built-up</td><td class="n">32,266</td></tr>
+                <tr><td>Existing tanks</td><td class="n">2,757</td></tr>
+              </tbody>
+            </table>
+            <div class="note warn" style="margin-top:14px">
+              <b>106,461 cells were excluded before scoring began.</b> A pond cannot be built in a
+              river, and the wettest ground is not always buildable ground.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════ WORKSPACE ══════════════════════════ -->
+<div class="page" id="p-bench">
+  <div class="bench">
+
+    <aside class="jobsheet">
+      <section>
+        <span class="stamp">Job</span>
+        <div class="fld">
+          <label for="v-vil">Village</label>
+          <input class="in" id="v-vil" placeholder="Search the register…">
+        </div>
+        <div class="fld">
+          <label>Contour survey</label>
+          <div class="dropzone">Drop KML / KMZ<br><span class="mono" style="font-size:11px">contours_1m.kml</span></div>
+        </div>
+        <button class="act" style="width:100%;justify-content:center">Run</button>
+      </section>
+
+      <section>
+        <span class="stamp">Parameters</span>
+        <div class="fld">
+          <div class="pair"><label for="v-n">Candidate sites</label><span class="rv">5</span></div>
+          <input id="v-n" type="range" min="1" max="25" value="5">
+        </div>
+        <div class="fld">
+          <div class="pair"><label for="v-s">Slope limit</label><span class="rv">8 %</span></div>
+          <input id="v-s" type="range" min="1" max="20" value="8">
+        </div>
+        <div class="fld">
+          <div class="pair"><label for="v-t">Channel threshold</label><span class="rv">1.0 ha</span></div>
+          <input id="v-t" type="range" min="1" max="50" value="10">
+        </div>
+      </section>
+
+      <section>
+        <span class="stamp">Read-back</span>
+        <div class="readback">
+          <div class="pair"><span>Grid</span><span class="mono">527 × 650 @ 5 m</span></div>
+          <div class="pair"><span>Levels</span><span class="mono">32 · 1 m</span></div>
+          <div class="pair"><span>Relief</span><span class="mono">31.0 m</span></div>
+          <div class="pair"><span>Data tier</span><span class="tag v">full</span></div>
+          <div class="pair"><span>Exclusions</span><span class="tag w">2 sources</span></div>
+        </div>
+      </section>
+
+      <section>
+        <span class="stamp">Issue</span>
+        <div style="display:grid;gap:8px">
+          <button class="act line" style="justify-content:center">Drawing · PDF</button>
+          <button class="act line" style="justify-content:center">Geometry · GeoJSON</button>
+        </div>
+      </section>
+    </aside>
+
+    <div class="drawing">
+      <svg class="sheetmap" viewBox="0 0 820 640" preserveAspectRatio="xMidYMid slice"
+           aria-label="Survey sheet showing contours, drainage, catchment boundary and ranked sites">
+        <rect width="820" height="640" fill="var(--paper)"/>
+        <!-- neat line and coordinate ticks -->
+        <g stroke="var(--rule-2)" stroke-width="1" fill="none">
+          <rect x="30" y="26" width="760" height="588"/>
+        </g>
+        <g stroke="var(--ink-3)" stroke-width="1">
+          <line x1="182" y1="26" x2="182" y2="34"/><line x1="334" y1="26" x2="334" y2="34"/>
+          <line x1="486" y1="26" x2="486" y2="34"/><line x1="638" y1="26" x2="638" y2="34"/>
+          <line x1="30" y1="173" x2="38" y2="173"/><line x1="30" y1="320" x2="38" y2="320"/>
+          <line x1="30" y1="467" x2="38" y2="467"/>
+        </g>
+        <g class="fig" font-size="8.5" fill="var(--ink-3)" font-family="IBM Plex Mono">
+          <text x="182" y="22" text-anchor="middle">81°17′</text>
+          <text x="486" y="22" text-anchor="middle">81°18′</text>
+          <text x="26" y="176" text-anchor="end" transform="rotate(-90 26 176)">21°15′</text>
+        </g>
+
+        <!-- contours: sepia, index lines heavier -->
+        <g fill="none" stroke="var(--contour)" stroke-width=".8" opacity=".85">
+          <path d="M40 560c110-64 200-28 268-88s150-116 268-100 216 50 204 12"/>
+          <path d="M40 520c110-64 200-28 268-88s150-116 268-100 216 50 204 12"/>
+          <path d="M40 440c110-64 200-28 268-88s150-116 268-100 216 50 204 12"/>
+          <path d="M40 400c110-64 200-28 268-88s150-116 268-100 216 50 204 12"/>
+          <ellipse cx="320" cy="352" rx="70" ry="38"/><ellipse cx="320" cy="352" rx="46" ry="23"/>
+          <ellipse cx="600" cy="238" rx="58" ry="30"/><ellipse cx="600" cy="238" rx="32" ry="16"/>
+        </g>
+        <g fill="none" stroke="var(--contour)" stroke-width="1.6">
+          <path d="M40 480c110-64 200-28 268-88s150-116 268-100 216 50 204 12"/>
+          <path d="M40 360c110-64 200-28 268-88s150-116 268-100 216 50 204 12"/>
+        </g>
+        <text x="196" y="466" font-size="9" fill="var(--contour)" font-family="IBM Plex Mono"
+              transform="rotate(-16 196 466)">276</text>
+        <text x="252" y="348" font-size="9" fill="var(--contour)" font-family="IBM Plex Mono"
+              transform="rotate(-16 252 348)">280</text>
+
+        <!-- catchment boundary -->
+        <path d="M112 600 L158 408 L282 306 L432 266 L566 204 L714 186 L752 268 L688 420 L512 512 L282 578 Z"
+              fill="var(--water)" fill-opacity=".05" stroke="var(--water)" stroke-width="1.5" stroke-dasharray="7 4"/>
+
+        <!-- drainage -->
+        <path d="M138 596 L188 428 L272 356 L346 380 L424 322 L516 300 L602 240 L692 216 L740 158"
+              fill="none" stroke="var(--water)" stroke-width="2.4"/>
+        <path d="M272 356 L238 274 M424 322 L432 244 M516 300 L556 372 M602 240 L640 174 M346 380 L322 452"
+              fill="none" stroke="var(--water-2)" stroke-width="1.4"/>
+
+        <!-- existing tank + river, both excluded -->
+        <path d="M742 60 C 778 132 792 226 770 306 C 752 388 728 458 744 574"
+              fill="none" stroke="var(--water-2)" stroke-width="22" opacity=".3"/>
+        <text x="726" y="52" font-size="9" fill="var(--water)" text-anchor="end" font-family="IBM Plex Sans">River — 50 m standoff</text>
+        <ellipse cx="188" cy="236" rx="30" ry="17" fill="var(--water-2)" fill-opacity=".3" stroke="var(--water)" stroke-width="1"/>
+        <text x="188" y="212" font-size="9" fill="var(--water)" text-anchor="middle" font-family="IBM Plex Sans">existing tank</text>
+
+        <!-- pond footprint at site 1 -->
+        <rect x="316" y="352" width="60" height="60" fill="var(--earth)" fill-opacity=".14"
+              stroke="var(--earth)" stroke-width="1.5"/>
+        <!-- sites -->
+        <g font-family="IBM Plex Mono" font-size="11" font-weight="500">
+          <g><rect x="337" y="368" width="18" height="18" fill="var(--earth)"/>
+             <text x="346" y="381" text-anchor="middle" fill="var(--paper)">1</text></g>
+          <g><rect x="507" y="291" width="16" height="16" fill="none" stroke="var(--earth)" stroke-width="1.6"/>
+             <text x="515" y="303" text-anchor="middle" fill="var(--earth)">2</text></g>
+          <g><rect x="230" y="266" width="16" height="16" fill="none" stroke="var(--earth)" stroke-width="1.6"/>
+             <text x="238" y="278" text-anchor="middle" fill="var(--earth)">3</text></g>
+        </g>
+
+        <!-- north arrow -->
+        <g transform="translate(752,566)">
+          <path d="M0 -22 L7 6 L0 0 L-7 6 Z" fill="var(--ink)"/>
+          <text x="0" y="20" font-size="10" text-anchor="middle" fill="var(--ink-2)" font-family="IBM Plex Mono">N</text>
+        </g>
+      </svg>
+
+      <div class="legendbox">
+        <span class="stamp">Legend</span>
+        <div class="items">
+          <div class="lg"><span class="key" style="border-color:var(--contour)"></span><span class="name">Contours · 1 m</span></div>
+          <div class="lg"><span class="key" style="border-color:var(--water)"></span><span class="name">Drainage</span></div>
+          <div class="extent">
+            <button class="on">Site catchment</button><button>Whole sheet</button>
+          </div>
+          <div class="lg"><span class="key" style="border-color:var(--water);border-top-style:dashed"></span><span class="name">Catchment</span></div>
+          <div class="lg"><span class="keyf" style="border-color:var(--earth);background:var(--earth-bg)"></span><span class="name">Pond footprint</span></div>
+          <div class="lg"><span class="keyf" style="border-color:var(--ink);background:var(--paper-3)"></span><span class="name">Relief · slope</span></div>
+          <div class="lg dim"><span class="keyf" style="border-color:var(--veg);background:var(--veg-bg)"></span><span class="name">Available land</span></div>
+        </div>
+      </div>
+
+      <div class="titleblock">
+        <div><span class="stamp">Sheet</span><span class="val">contours_1m</span></div>
+        <div><span class="stamp">Scale</span><span class="val">1 : 12 000</span></div>
+        <div><span class="stamp">CRS</span><span class="val">EPSG 32644</span></div>
+      </div>
+    </div>
+
+    <aside class="findings">
+      <div class="f-tabs">
+        <button class="on" data-f="p">Proposal</button>
+        <button data-f="c">Candidates</button>
+        <button data-f="h">Hydrology</button>
+        <button data-f="y">Yield</button>
+        <button data-f="q">Caveats</button>
+      </div>
+      <div class="f-body">
+
+        <div class="f-pane on" id="f-p">
+          <div class="rec">
+            <div class="hd"><span class="r">SITE 1</span><span class="k">channel position</span><span class="s">82.7</span></div>
+            <div class="bd">
+              <table class="svy">
+                <tbody>
+                  <tr><td>Catchment<small>1.80 km²</small></td><td class="n">180.3 ha</td></tr>
+                  <tr><td>Design depth<small>141 × 141 m footprint</small></td><td class="n">4.50 m</td></tr>
+                  <tr><td>Gross storage</td><td class="n">81,682 m³</td></tr>
+                  <tr><td>Live storage<small>above dead level</small></td><td class="n">73,514 m³</td></tr>
+                  <tr><td>Indicative cost</td><td class="n">₹1.20 cr</td></tr>
+                </tbody>
+              </table>
+              <div class="note warn" style="margin-top:13px">
+                <b>Binding constraint: excavation depth.</b> Not catchment yield and not available
+                land — deepening beyond 4.5 m is what would raise capacity.</div>
+            </div>
+          </div>
+
+          <span class="stamp">Criteria contribution</span>
+          <div class="wgt">
+            <div class="r"><span>Flow accumulation</span><span class="tr"><span class="fl" style="width:94%"></span></span><span class="n">0.281</span></div>
+            <div class="r"><span>Depression depth</span><span class="tr"><span class="fl" style="width:64%"></span></span><span class="n">0.192</span></div>
+            <div class="r"><span>Land availability</span><span class="tr"><span class="fl" style="width:47%"></span></span><span class="n">0.140</span></div>
+            <div class="r"><span>Slope</span><span class="tr"><span class="fl" style="width:46%"></span></span><span class="n">0.139</span></div>
+            <div class="r"><span>Plan concavity</span><span class="tr"><span class="fl" style="width:25%"></span></span><span class="n">0.075</span></div>
+          </div>
+
+          <span class="stamp">Section</span>
+          <div class="plate"><span class="tick-l"></span><span class="tick-r"></span>
+            <svg viewBox="0 0 320 128">
+              <g stroke="var(--rule)" stroke-width=".7">
+                <line x1="12" y1="34" x2="308" y2="34"/><line x1="12" y1="66" x2="308" y2="66"/>
+                <line x1="12" y1="98" x2="308" y2="98"/>
+              </g>
+              <path d="M96 62 L118 96 L206 96 L232 62 Z" fill="var(--water-2)" fill-opacity=".28"/>
+              <line x1="90" y1="62" x2="252" y2="62" stroke="var(--water)" stroke-width="1.4"/>
+              <path d="M12 104 C 48 96 74 78 96 62 C 130 44 176 46 206 54
+                       C 226 58 238 60 246 62 C 268 68 288 46 308 26"
+                    fill="none" stroke="var(--ink)" stroke-width="1.7"/>
+              <path d="M232 62 L246 40 L268 40 L280 62 Z" fill="var(--paper-3)" stroke="var(--ink)" stroke-width="1.2"/>
+            </svg>
+            <div class="plate-cap"><span>Plate 2 — section at site 1</span><span>×8</span></div>
+          </div>
+        </div>
+
+        <div class="f-pane" id="f-c">
+          <p style="font-size:13px;color:var(--ink-2);margin-bottom:14px">
+            25 candidates cleared the thresholds. Showing 5.</p>
+          <table class="svy picklist">
+            <thead><tr><th>#</th><th>Form</th><th class="n">Score</th><th class="n">Catchment</th><th class="n">Storage</th></tr></thead>
+            <tbody>
+              <tr class="on"><td>1</td><td>channel</td><td class="n">82.7</td><td class="n">180.3</td><td class="n">81,682</td></tr>
+              <tr><td>2</td><td>depression</td><td class="n">69.6</td><td class="n">112.2</td><td class="n">3,119</td></tr>
+              <tr><td>3</td><td>depression</td><td class="n">69.6</td><td class="n">97.5</td><td class="n">2,410</td></tr>
+              <tr><td>4</td><td>channel</td><td class="n">68.8</td><td class="n">18.6</td><td class="n">1,884</td></tr>
+              <tr><td>5</td><td>depression</td><td class="n">68.0</td><td class="n">26.6</td><td class="n">1,502</td></tr>
+            </tbody>
+          </table>
+          <div class="fld" style="margin-top:18px">
+            <div class="pair"><label>Shown on the sheet</label><span class="rv">5 of 25</span></div>
+            <input type="range" min="1" max="25" value="5">
+          </div>
+        </div>
+
+        <div class="f-pane" id="f-h">
+          <span class="stamp">Drainage · site catchment</span>
+          <table class="svy">
+            <tbody>
+              <tr><td>Channels<small>above 1 ha</small></td><td class="n">60</td></tr>
+              <tr><td>Total length</td><td class="n">12.23 km</td></tr>
+              <tr><td>Drainage density</td><td class="n">6.79 km/km²</td></tr>
+              <tr><td>Highest Strahler order</td><td class="n">3</td></tr>
+              <tr><td>Longest flow path</td><td class="n">2,449 m</td></tr>
+              <tr><td>Time of concentration</td><td class="n">65.1 min</td></tr>
+            </tbody>
+          </table>
+          <span class="stamp">Stage–storage</span>
+          <div class="plate"><span class="tick-l"></span><span class="tick-r"></span>
+            <svg viewBox="0 0 320 150">
+              <g stroke="var(--rule)" stroke-width=".7">
+                <line x1="40" y1="120" x2="308" y2="120"/><line x1="40" y1="84" x2="308" y2="84"/>
+                <line x1="40" y1="48" x2="308" y2="48"/><line x1="40" y1="14" x2="308" y2="14"/>
+              </g>
+              <line x1="40" y1="14" x2="40" y2="120" stroke="var(--ink-3)"/>
+              <path d="M40 120 L86 111 L132 94 L178 71 L224 47 L270 28 L306 18"
+                    fill="none" stroke="var(--water)" stroke-width="2"/>
+              <g stroke="var(--earth)" stroke-width="1" stroke-dasharray="3 2">
+                <line x1="224" y1="47" x2="224" y2="120"/><line x1="40" y1="47" x2="224" y2="47"/></g>
+              <rect x="220" y="43" width="8" height="8" fill="var(--earth)"/>
+              <text x="232" y="42" font-size="9" fill="var(--earth)" font-family="IBM Plex Mono">4.50 m</text>
+              <text x="36" y="123" font-size="8.5" fill="var(--ink-3)" text-anchor="end" font-family="IBM Plex Mono">0</text>
+              <text x="36" y="17" font-size="8.5" fill="var(--ink-3)" text-anchor="end" font-family="IBM Plex Mono">90k</text>
+            </svg>
+            <div class="plate-cap"><span>Plate 3 — stage–storage</span><span>m³ vs m</span></div>
+          </div>
+        </div>
+
+        <div class="f-pane" id="f-y">
+          <span class="stamp">Runoff · SCS-CN</span>
+          <table class="svy">
+            <tbody>
+              <tr><td>Curve number<small>hydrologic soil group D</small></td><td class="n">87.9</td></tr>
+              <tr><td>Runoff coefficient</td><td class="n">0.257</td></tr>
+              <tr><td>Annual mean yield</td><td class="n">608,000 m³</td></tr>
+              <tr><td>75 % dependable</td><td class="n">427,000 m³</td></tr>
+              <tr><td>Share captured</td><td class="n">13 %</td></tr>
+            </tbody>
+          </table>
+          <span class="stamp">Storage through the year</span>
+          <div class="plate"><span class="tick-l"></span><span class="tick-r"></span>
+            <svg viewBox="0 0 320 140">
+              <line x1="24" y1="112" x2="308" y2="112" stroke="var(--ink-3)"/>
+              <line x1="24" y1="96" x2="308" y2="96" stroke="var(--earth)" stroke-width="1" stroke-dasharray="3 2"/>
+              <g fill="var(--water-2)" fill-opacity=".75">
+                <rect x="30" y="92" width="17" height="20"/><rect x="53" y="96" width="17" height="16"/>
+                <rect x="76" y="100" width="17" height="12"/><rect x="99" y="102" width="17" height="10"/>
+                <rect x="122" y="94" width="17" height="18"/><rect x="145" y="52" width="17" height="60"/>
+                <rect x="168" y="20" width="17" height="92"/><rect x="191" y="26" width="17" height="86"/>
+                <rect x="214" y="48" width="17" height="64"/><rect x="237" y="76" width="17" height="36"/>
+                <rect x="260" y="88" width="17" height="24"/><rect x="283" y="90" width="17" height="22"/>
+              </g>
+              <g font-size="8" fill="var(--ink-3)" text-anchor="middle" font-family="IBM Plex Mono">
+                <text x="38" y="124">J</text><text x="61" y="124">F</text><text x="84" y="124">M</text>
+                <text x="107" y="124">A</text><text x="130" y="124">M</text><text x="153" y="124">J</text>
+                <text x="176" y="124">J</text><text x="199" y="124">A</text><text x="222" y="124">S</text>
+                <text x="245" y="124">O</text><text x="268" y="124">N</text><text x="291" y="124">D</text>
+              </g>
+              <text x="306" y="93" font-size="8" fill="var(--earth)" text-anchor="end" font-family="IBM Plex Mono">dead level</text>
+            </svg>
+            <div class="plate-cap"><span>Plate 4 — monthly water balance</span><span>inflow − evap − seepage</span></div>
+          </div>
+        </div>
+
+        <div class="f-pane" id="f-q">
+          <div style="display:grid;gap:11px">
+            <div class="note stop"><b>Land tenure is not modelled.</b> No open dataset carries
+              village-level ownership. This site may be privately held — check the cadastral record
+              or verify on the ground before committing.</div>
+            <div class="note"><b>99,493 cells lay in closed depressions</b> and were flooded to
+              their spill level, the deepest 12.00 m. Confirm that is a real landform and not an
+              artefact of interpolation between contours.</div>
+            <div class="note"><b>Two candidates suppressed</b> for lying within 300 m of a
+              higher-ranked site.</div>
+            <div class="note"><b>Catchment does not touch the sheet edge</b>, so the contributing
+              area is a measurement rather than a lower bound.</div>
+          </div>
+        </div>
+      </div>
+    </aside>
+  </div>
+</div>
+
+<!-- ══════════════════════════ METHOD ══════════════════════════ -->
+<div class="page" id="p-method">
+  <div class="sheet method">
+    <nav class="index">
+      <span class="stamp">Contents</span>
+      <a href="#s1" class="on">1 · Surface</a>
+      <a href="#s2">2 · Flow</a>
+      <a href="#s3">3 · Exclusions</a>
+      <a href="#s4">4 · Ranking</a>
+      <a href="#s5">5 · Yield</a>
+      <a href="#s6">6 · Design</a>
+      <a href="#s7">7 · Limitations</a>
+      <div style="margin-top:18px">
+        <button class="act line" style="padding:8px 13px" onclick="window.print()">Print</button>
+      </div>
+    </nav>
+
+    <div class="prose">
+      <span class="stamp">Method</span>
+      <h1 style="font-size:40px;margin-top:12px">How the proposal is arrived at</h1>
+      <p style="font-size:16.5px">Six stages, each a published method. The intermediate artefact of
+        every stage is available through the API, so a reviewer can check the surface, the flow
+        network or the ranking independently rather than accepting the final figure.</p>
+
+      <h2 id="s1">1 · Surface</h2>
+      <p>Contour polylines carry elevation; the ground between them does not exist in the file.
+        Vertices are triangulated and the surface interpolated linearly within each triangle, giving
+        a regular grid whose cell size follows contour spacing — 5 m on the sample sheet.</p>
+      <p>The working coordinate system is derived from the sheet's own longitude, so slope, area and
+        distance are computed in metres. Nothing about the location is fixed in the code: the sample
+        resolves to UTM 44N, and test sheets in four other zones — including the southern
+        hemisphere — resolve correctly.</p>
+
+      <h2 id="s2">2 · Flow</h2>
+      <p>Closed depressions are raised to their spill level by Priority-Flood with an ε gradient, so
+        water still has a descending path across filled ground. Where a depression is an artefact of
+        a road or bund crossing a channel, a bounded least-cost breach is cut instead of filling.</p>
+      <p>Flow direction follows the eight-neighbour steepest descent. Accumulation is traced in
+        dependency order so every cell is visited once. A cell becomes a channel above a
+        contributing-area threshold — 1 ha by default, deliberately small, because a nala draining a
+        few hectares is precisely where a check dam belongs.</p>
+      <div class="eq">Tc = 0.01947 · L<sup>0.77</sup> · S<sup>−0.385</sup>
+        <span class="whence">Time of concentration, Kirpich (1940). L is the longest flow path in
+          metres, S its average gradient.</span></div>
+      <p class="src">Barnes, Lehman &amp; Mulla (2014) · Lindsay (2016) · Strahler (1957)</p>
+
+      <h2 id="s3">3 · Exclusions</h2>
+      <p>Some ground cannot hold a pond however well it scores, and the veto is applied to the
+        buildable mask <em>before</em> ranking, so excluded ground is never proposed and then
+        withdrawn. Each standoff follows from what the hazard does to a structure.</p>
+      <table class="svy">
+        <thead><tr><th>Feature</th><th class="n">Standoff</th><th>Reason</th></tr></thead>
+        <tbody>
+          <tr><td>Existing tank</td><td class="n">0 m</td><td>Its bank is sound ground; only the water is barred.</td></tr>
+          <tr><td>River, canal</td><td class="n">50 m</td><td>A village pond cannot impound a river, and the land beside one floods.</td></tr>
+          <tr><td>Building</td><td class="n">50 m</td><td>Impoundment against a dwelling is a safety matter.</td></tr>
+          <tr><td>Road</td><td class="n">20 m</td><td>The embankment and its borrow area need the room.</td></tr>
+          <tr><td>Stream, drain, ditch</td><td class="n">none</td><td>Never excluded — a check dam belongs on one.</td></tr>
+        </tbody>
+      </table>
+      <p>A river is read from both conventions used to map it: the centreline and the areal water
+        body, which carries no waterway tag at all. Reading only the first classified a 563.6 ha
+        river as standing water and left 64.7 ha of its bank open to proposals.</p>
+
+      <h2 id="s4">4 · Ranking</h2>
+      <p>Nine criteria, weighted by the Analytic Hierarchy Process. Weights are the principal
+        eigenvector of the pairwise comparison matrix, and the matrix is tested for consistency
+        before any weight is used.</p>
+      <table class="svy">
+        <thead><tr><th>Criterion</th><th class="n">Weight</th></tr></thead>
+        <tbody>
+          <tr><td>Flow accumulation</td><td class="n">0.2000</td></tr>
+          <tr><td>Slope</td><td class="n">0.1714</td></tr>
+          <tr><td>Depression depth</td><td class="n">0.1333</td></tr>
+          <tr><td>Soil runoff potential</td><td class="n">0.1238</td></tr>
+          <tr><td>Land availability</td><td class="n">0.1143</td></tr>
+          <tr><td>Distance to stream</td><td class="n">0.0762</td></tr>
+          <tr><td>Plan concavity</td><td class="n">0.0762</td></tr>
+          <tr><td>Distance to settlement</td><td class="n">0.0571</td></tr>
+          <tr><td>Distance to waterbody</td><td class="n">0.0476</td></tr>
+        </tbody>
+      </table>
+      <div class="eq">CI = (λ<sub>max</sub> − n) / (n − 1)&nbsp;&nbsp;&nbsp;CR = CI / RI(n)
+        <span class="whence">λ<sub>max</sub> 9.1058 · n 9 · CI 0.0132 · RI(9) 1.45 →
+          CR = <b>0.0091</b>, against Saaty's admissible limit of 0.10.</span></div>
+      <p class="src">Saaty (1980), <em>The Analytic Hierarchy Process</em></p>
+
+      <h2 id="s5">5 · Yield</h2>
+      <p>Runoff follows SCS-CN with the initial abstraction taken at 0.3S rather than the textbook
+        0.2S, following Central Water Commission and IMD practice for Indian catchments. The curve
+        number comes from hydrologic soil group and land cover, adjusted for antecedent moisture.</p>
+      <div class="eq">Q = (P − 0.3S)² / (P + 0.7S)&nbsp;&nbsp;&nbsp;S = 25400/CN − 254
+        <span class="whence">P and Q in mm. Q is zero for P ≤ 0.3S.</span></div>
+      <p>A single empirical formula should not be trusted alone, so the result is cross-checked
+        against four independent Indian relations — Inglis–DeSouza (1929), Khosla (1960), Barlow
+        (1912) and the Rational method. Design yield is the 75 % dependable value from the annual
+        series, which is the basis used for minor irrigation works.</p>
+
+      <h2 id="s6">6 · Design</h2>
+      <p>The stage–storage relation is built by flood-filling the conditioned surface level by
+        level. Volume between two levels uses the prismoidal rule, exact for a linearly varying
+        cross-section:</p>
+      <div class="eq">V = (d/3) · ( A<sub>top</sub> + A<sub>bottom</sub> + √(A<sub>top</sub> · A<sub>bottom</sub>) )
+        <span class="whence">d is the level increment; A the plan area impounded at each level.</span></div>
+      <p>Design depth is set by whichever constraint binds first — practical excavation depth,
+        available land, sustainable share of catchment yield, or side-slope closure — and the report
+        names it. A depth quoted without its binding constraint invites the wrong next question.</p>
+      <p>A monthly balance then subtracts open-water evaporation and seepage by soil group from
+        inflow, over a three-year spin-up, and reports how many months the pond holds water above
+        dead storage.</p>
+
+      <h2 id="s7">7 · Limitations</h2>
+      <ul class="bul">
+        <li><b>The surface is interpolated, not surveyed.</b> A hollow smaller than the contour
+          interval cannot appear in it at all.</li>
+        <li><b>Flow is routed to a single neighbour.</b> On genuinely flat ground this gives parallel
+          flow lines where real water spreads.</li>
+        <li><b>A catchment clipped by the sheet edge is a lower bound</b>, and is reported as such
+          rather than as a measurement.</li>
+        <li><b>Yield is a design estimate.</b> SCS-CN is an accepted method, not a gauge reading; the
+          cross-checks bound it, they do not calibrate it.</li>
+        <li><b>Tenure is outside the model.</b> Ownership must be confirmed from the cadastral
+          record.</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════ REFERENCE ══════════════════════════ -->
+<div class="page" id="p-ref">
+  <div class="sheet">
+    <div class="blk" style="border-top:0">
+      <div class="mgn" style="padding-top:44px"><div class="no">A</div><span class="stamp">Interfaces</span></div>
+      <div class="bdy" style="padding-top:44px">
+        <h2>Reference</h2>
+        <p style="color:var(--ink-2);margin-top:12px;max-width:58ch">Every stage of the analysis is
+          reachable on its own, so the surface, the flow network, the catchment or the ranking can be
+          taken and checked separately.</p>
+
+        <div class="refgrid" style="margin-top:26px">
+          <a href="#" onclick="return false">
+            <h3>API documentation</h3>
+            <p>29 endpoints, OpenAPI 3.1 — interactive request builder with schemas and examples.</p>
+            <span class="go">Open Swagger UI ↗</span></a>
+          <a href="#" onclick="return false">
+            <h3>Reference reader</h3>
+            <p>The same specification laid out for reading rather than for calling.</p>
+            <span class="go">Open ReDoc ↗</span></a>
+          <a href="#" onclick="return false">
+            <h3>Raw specification</h3>
+            <p>Machine-readable OpenAPI document for client generation.</p>
+            <span class="go">openapi.json ↗</span></a>
+          <a href="#" onclick="return false">
+            <h3>Technical report</h3>
+            <p>Full derivations, measured results and the reasoning behind each parameter.</p>
+            <span class="go">Read ↗</span></a>
+          <a href="#" onclick="return false">
+            <h3>Sample drawing</h3>
+            <p>The PDF this tool issues for the bundled Durg sheet.</p>
+            <span class="go">Download ↗</span></a>
+          <a href="#" onclick="return false">
+            <h3>Source</h3>
+            <p>Repository, installation guide and the test suite.</p>
+            <span class="go">Open ↗</span></a>
+        </div>
+      </div>
+    </div>
+
+    <div class="blk">
+      <div class="mgn"><div class="no">B</div><span class="stamp">Endpoints</span></div>
+      <div class="bdy">
+        <h3 style="margin-bottom:16px">Principal routes</h3>
+        <table class="svy">
+          <thead><tr><th>Route</th><th>Returns</th></tr></thead>
+          <tbody>
+            <tr><td class="mono">POST /analyzeContour</td><td>Ranked sites, catchments, designs — the whole analysis</td></tr>
+            <tr><td class="mono">POST /findCatchment</td><td>The same, under the name the brief uses</td></tr>
+            <tr><td class="mono">POST /terrain/contour-map</td><td>Parsed sheet and interpolated surface, no siting</td></tr>
+            <tr><td class="mono">POST /hydrology/streams</td><td>Drainage network, clipped to a catchment or whole-sheet</td></tr>
+            <tr><td class="mono">POST /hydrology/catchment</td><td>Catchment above an arbitrary point</td></tr>
+            <tr><td class="mono">POST /suitability/weights/ahp</td><td>Weights from a pairwise matrix, with consistency ratio</td></tr>
+            <tr><td class="mono">POST /reports/generate</td><td>The drawing, as PDF</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="blk">
+      <div class="mgn"><div class="no">C</div><span class="stamp">Sources</span></div>
+      <div class="bdy" style="padding-bottom:60px">
+        <h3 style="margin-bottom:16px">Data and attribution</h3>
+        <table class="svy">
+          <thead><tr><th>Layer</th><th>Source</th><th>Licence</th></tr></thead>
+          <tbody>
+            <tr><td>Elevation</td><td>Copernicus GLO-30</td><td>Copernicus</td></tr>
+            <tr><td>Land cover</td><td>ESA WorldCover 10 m</td><td>CC BY 4.0</td></tr>
+            <tr><td>Soil</td><td>ISRIC SoilGrids</td><td>CC BY 4.0</td></tr>
+            <tr><td>Features</td><td>OpenStreetMap</td><td>ODbL</td></tr>
+            <tr><td>Rainfall</td><td>ERA5-Land · NASA POWER</td><td>Open</td></tr>
+            <tr><td>Boundaries</td><td>SHRUG · geoBoundaries</td><td>CC0 · ODbL</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<footer class="colophon">
+  <div class="sheet">
+    <div class="cols">
+      <div>
+        <span class="stamp">Contour</span>
+        <p style="max-width:36ch;color:var(--ink-2);font-size:13.5px">Pond siting and catchment
+          assessment for Indian villages, from the contour sheet a Panchayat already has.</p>
+      </div>
+      <div><span class="stamp">Pages</span>
+        <a href="#" data-go="brief">Brief</a><a href="#" data-go="bench">Workspace</a><a href="#" data-go="method">Method</a></div>
+      <div><span class="stamp">Interfaces</span>
+        <a href="#" onclick="return false">API docs</a><a href="#" onclick="return false">openapi.json</a><a href="#" onclick="return false">Repository</a></div>
+      <div><span class="stamp">Documents</span>
+        <a href="#" onclick="return false">Technical report</a><a href="#" onclick="return false">Sample drawing</a></div>
+    </div>
+    <div class="foot">
+      <span>Contains modified Copernicus data · © OpenStreetMap contributors, ODbL · ESA WorldCover, CC BY 4.0</span>
+      <span class="mono">CSD Assignment 1</span>
+    </div>
+  </div>
+</footer>
+
+</div>
+<script>
+  function go(id) {
+    document.querySelectorAll('.page').forEach(p => p.classList.toggle('on', p.id === 'p-' + id));
+    document.querySelectorAll('.mh-nav button').forEach(b => {
+      if (b.dataset.go === id) b.setAttribute('aria-current', 'page');
+      else b.removeAttribute('aria-current');
+    });
+    window.scrollTo(0, 0);
+  }
+  document.querySelectorAll('[data-go]').forEach(el =>
+    el.addEventListener('click', e => { e.preventDefault(); go(el.dataset.go); }));
+
+  document.querySelectorAll('.f-tabs button').forEach(b => b.addEventListener('click', () => {
+    document.querySelectorAll('.f-tabs button').forEach(x => x.classList.toggle('on', x === b));
+    document.querySelectorAll('.f-pane').forEach(p => p.classList.toggle('on', p.id === 'f-' + b.dataset.f));
+  }));
+
+  document.querySelectorAll('.extent button').forEach(b => b.addEventListener('click', () => {
+    document.querySelectorAll('.extent button').forEach(x => x.classList.toggle('on', x === b));
+  }));
+
+  const root = document.documentElement, flip = document.getElementById('flip');
+  flip.addEventListener('click', () => {
+    const linen = root.getAttribute('data-plate') === 'linen';
+    root.setAttribute('data-plate', linen ? 'paper' : 'linen');
+    flip.textContent = linen ? 'Linen' : 'Paper';
+  });
+
+  document.querySelectorAll('.index a').forEach(a => a.addEventListener('click', () =>
+    document.querySelectorAll('.index a').forEach(x => x.classList.toggle('on', x === a))));
+</script>
+</body>
+</html>

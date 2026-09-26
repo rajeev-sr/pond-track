@@ -100,7 +100,7 @@ seed-clean:  ## Wipe and re-seed from scratch (re-downloads if --refresh added)
 	$(COMPOSE) exec -T postgis psql -U contour -d contour -c 'truncate villages, admin_areas cascade'
 	$(MAKE) seed
 
-API ?= http://localhost:8000
+API ?= http://10.1.75.53:3272
 
 demo:  ## Analyse the bundled sample contour map against a running API
 	./scripts/demo_contour.sh
@@ -111,8 +111,9 @@ report:  ## Build docs/REPORT.html + REPORT.pdf from captured API output
 report-capture:  ## Re-capture the API output the report quotes (needs a running API)
 	@mkdir -p docs/report/assets
 	curl -s -X POST $(API)/api/v1/analyzeContour \
-	  -F "file=@contours_1m.kml" -F "max_sites=5" -o docs/report/assets/analysis.json
+	  -F "contour_map=@contours_1m.kml" -F "max_sites=5" -o docs/report/assets/analysis.json
 	curl -s $(API)/openapi.json -o docs/report/assets/openapi.json
+	curl -s $(API)/api/v1/health/ready -o docs/report/assets/ready.json
 	@echo "captured; now run: make report"
 
 demo-warm:  ## Fill the provider caches, then prove DEMO_MODE runs offline

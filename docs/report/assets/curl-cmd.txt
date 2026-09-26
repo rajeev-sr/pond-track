@@ -1,0 +1,2 @@
+$ curl -X POST http://10.1.75.53:3272/api/v1/analyzeContour \
+       -F "contour_map=@contours_1m.kml" -F "max_sites=5"
