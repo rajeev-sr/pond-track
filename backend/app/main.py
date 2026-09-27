@@ -93,6 +93,20 @@ def create_app() -> FastAPI:
 
     register_exception_handlers(app)
     app.include_router(api_router, prefix=API_PREFIX)
+
+    # Last, so its catch-all route is matched only after every API route.
+    if s.FRONTEND_DIST:
+        from pathlib import Path
+
+        from app.web import mount_frontend
+
+        dist = Path(s.FRONTEND_DIST)
+        if (dist / "index.html").is_file():
+            mount_frontend(app, dist)
+        else:
+            get_logger("startup").warning(
+                "frontend_not_served", detail=f"FRONTEND_DIST={dist} has no index.html"
+            )
     return app
 
 

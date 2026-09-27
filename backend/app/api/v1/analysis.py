@@ -21,9 +21,19 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Response, UploadFile, status
 
-from app.api.v1.contour import _options_form, _read_upload, _safe_filename
+from app.api.v1.contour import (
+    _options_form,
+    _read_upload,
+    _safe_filename,
+    area_options,
+    area_problem,
+)
+from app.api.v1.slots import refuse_when_queue_full
+from app.config import get_settings
 from app.core.errors import NotFoundProblem, UnanswerableProblem
 from app.core.logging import get_logger
+from app.schemas.contour import AnalyzeAreaRequest
+from app.services import area as area_service
 from app.services.contour_analysis import ContourAnalysisOptions
 from app.services.job_store import get_store
 from app.services.jobs import TERMINAL_STATES
@@ -72,6 +82,7 @@ async def start_analysis(
     from app.api.v1.contour import _one_upload
 
     data, filename = await _read_upload(_one_upload(contour_map, file))
+    refuse_when_queue_full()
     job_id = uuid.uuid4().hex
 
     from app.workers.tasks import worker_available
@@ -126,6 +137,70 @@ async def start_analysis(
         "result_url": f"/api/v1/analysis/{job_id}/result",
         "executor": "celery" if dispatched_to_worker else "in_process",
         "estimated_duration_s": 25,
+        "poll_after_s": 1,
+    }
+
+
+@router.post(
+    "/area",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Start analysing a rectangle drawn on the map",
+    description=(
+        "The job form of `POST /analyzeArea`, for the browser's progress bar. The "
+        "rectangle is validated before the job is accepted, so a box that is "
+        "inverted, too small or over the cap is answered at once (400 / 413) "
+        "rather than as a job that fails later.\n\n"
+        "Poll `GET /analysis/{job_id}/status`, then fetch `.../result`. The steps "
+        "are `terrain` (fetching Copernicus GLO-30), then the same pipeline as a "
+        "contour map. Runs in this process."
+    ),
+)
+async def start_area_analysis(
+    background: BackgroundTasks,
+    response: Response,
+    request: AnalyzeAreaRequest,
+) -> Any:
+    try:
+        area_service.validate_bbox(request.bbox, max_km2=float(get_settings().MAX_AOI_KM2))
+    except area_service.AreaError as exc:
+        raise area_problem(exc) from exc
+    refuse_when_queue_full()
+
+    import time as _time
+
+    from app.services.job_runner import run_area_job
+    from app.services.job_store import JobRecord
+    from app.services.jobs import AREA_STEPS, JobProgress
+
+    job_id = uuid.uuid4().hex
+    options = area_options(request).as_dict()
+    # Seeded synchronously, as for a contour job, so the browser's first poll
+    # finds the job rather than a 404 -- and with the area's own steps, so that
+    # first poll already shows `terrain` rather than `parse`.
+    now = _time.time()
+    get_store().put(
+        JobRecord(
+            job_id=job_id,
+            progress=JobProgress(steps=AREA_STEPS).as_dict(),
+            params={**options, "bbox": list(request.bbox)},
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    # In process, not Celery: the workers only know the contour task, and the
+    # deployment spreads load across systems at the gateway rather than a queue.
+    background.add_task(run_area_job, job_id, list(request.bbox), options)
+
+    status_url = f"/api/v1/analysis/{job_id}/status"
+    response.headers["Location"] = status_url
+    log.info("area analysis job accepted", job_id=job_id, bbox=request.bbox)
+    return {
+        "job_id": job_id,
+        "state": "queued",
+        "status_url": status_url,
+        "result_url": f"/api/v1/analysis/{job_id}/result",
+        "executor": "in_process",
+        "estimated_duration_s": 20,
         "poll_after_s": 1,
     }
 

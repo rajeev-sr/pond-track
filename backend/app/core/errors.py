@@ -26,10 +26,13 @@ class ProblemError(Exception):
     type: str = "/errors/internal"
     title: str = "Internal server error"
 
-    def __init__(self, detail: str, **extra: Any) -> None:
+    def __init__(self, detail: str, *, headers: dict[str, str] | None = None, **extra: Any) -> None:
         super().__init__(detail)
         self.detail = detail
         self.extra = extra
+        #: Response headers, for the few problems that need one -- `Retry-After`
+        #: on a busy answer is what lets a client wait instead of guessing.
+        self.headers = headers
 
     def to_problem(self, instance: str, trace_id: str) -> dict[str, Any]:
         body: dict[str, Any] = {
@@ -77,6 +80,13 @@ class ProviderUnavailableProblem(ProblemError):
     status, type, title = 503, "/errors/provider-unavailable", "Upstream data source unavailable"
 
 
+class BusyProblem(ProblemError):
+    """503 -- every analysis slot on this instance is taken. Carries
+    `Retry-After`, because "busy" without "until when" leaves a client guessing."""
+
+    status, type, title = 503, "/errors/busy", "Server busy"
+
+
 class NotConfiguredProblem(ProblemError):
     """503 -- the capability exists but its credentials are absent (M8-12)."""
 
@@ -112,6 +122,7 @@ def register_exception_handlers(app: FastAPI) -> None:
             status_code=exc.status,
             content=exc.to_problem(request.url.path, trace),
             media_type=CONTENT_TYPE,
+            headers=exc.headers,
         )
 
     @app.exception_handler(RequestValidationError)
@@ -163,6 +174,33 @@ def register_exception_handlers(app: FastAPI) -> None:
                 "title": "Capability not configured",
                 "status": 503,
                 "detail": str(exc),
+                "instance": request.url.path,
+                "trace_id": trace,
+            },
+            media_type=CONTENT_TYPE,
+        )
+
+    from sqlalchemy.exc import OperationalError
+
+    @app.exception_handler(OperationalError)
+    async def _database(request: Request, _exc: OperationalError) -> JSONResponse:
+        # The database backs one optional feature -- the village register -- and
+        # an unreachable one used to surface as a bare 500 "unexpected error" the
+        # moment someone typed a village name. It is not unexpected: the lab
+        # systems run without one. Say so, and say what still works.
+        trace = _trace_id(request)
+        log.warning("database_unavailable", path=request.url.path, trace_id=trace)
+        return JSONResponse(
+            status_code=503,
+            content={
+                "type": "/errors/database-unavailable",
+                "title": "Database unavailable",
+                "status": 503,
+                "detail": (
+                    "this needs the village register database, which this server cannot "
+                    "reach. Everything else works without it: upload a contour map or "
+                    "draw the area on the map."
+                ),
                 "instance": request.url.path,
                 "trace_id": trace,
             },

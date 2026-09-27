@@ -17,25 +17,40 @@ import math
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
+import numpy as np
+from fastapi import APIRouter, Depends, File, Form, Query, Response, UploadFile
 from fastapi.concurrency import run_in_threadpool
 
+from app.api.v1.slots import analysis_slot
 from app.config import get_settings
-from app.core.errors import NotFoundProblem, UnanswerableProblem, ValidationProblem
+from app.core.errors import (
+    AoiTooLargeProblem,
+    NotFoundProblem,
+    ProviderUnavailableProblem,
+    UnanswerableProblem,
+    ValidationProblem,
+)
 from app.core.logging import get_logger
+from app.providers.base import ProviderUnavailableError
 from app.providers.elevation.contour_kml import (
     MAX_UPLOAD_BYTES,
     ContourParseError,
     parse_contour_file,
 )
-from app.schemas.contour import ContourAnalysisResponse, ContourMapUploadResponse
+from app.schemas.contour import (
+    AnalyzeAreaRequest,
+    ContourAnalysisResponse,
+    ContourMapUploadResponse,
+)
+from app.services import area as area_service
 from app.services import conditioning as conditioning_service
-from app.services import contours, dem_cache, derivatives, land, raster, siting, streams
+from app.services import contours, dem_cache, derivatives, land, overlays, raster, siting, streams
 from app.services import hydrology as hyd
 from app.services.contour_analysis import (
     DEFAULT_SNAP_RADIUS_M,
     DEFAULT_STREAM_THRESHOLD_HA,
     ContourAnalysisOptions,
+    analyze_area,
     analyze_contour_map,
 )
 from app.services.geometry import (
@@ -47,6 +62,10 @@ from app.services.geometry import (
     reaches_to_geojson,
 )
 from app.services.interpolate import MAX_CELL_M, MIN_CELL_M, contours_to_dem
+
+#: Seconds `/land/available` waits for land cover and OpenStreetMap, the same
+#: deadline an analysis gives its enrichment.
+LAND_BUDGET_S = 20.0
 
 router = APIRouter(tags=["contour"])
 log = get_logger("contour")
@@ -274,21 +293,24 @@ def _options_form(
 
 async def _run(file: UploadFile, opts: ContourAnalysisOptions) -> Any:
     data, name = await _read_upload(file)
-    try:
-        # Off the event loop. The pipeline is several seconds of raster work plus
-        # blocking provider calls; running it inline would stall every other
-        # request -- including /health -- for the whole analysis.
-        result = await run_in_threadpool(analyze_contour_map, data, name, opts)
-    except ContourParseError as exc:
-        log.warning("contour_parse_failed", filename=name, detail=str(exc))
-        raise _as_unanswerable(exc, name) from exc
+    # A slot first: on a 512 MB system a second concurrent analysis is an OOM
+    # kill, so without one this answers 503 + Retry-After instead.
+    with analysis_slot():
+        try:
+            # Off the event loop. The pipeline is several seconds of raster work
+            # plus blocking provider calls; running it inline would stall every
+            # other request -- including /health -- for the whole analysis.
+            result = await run_in_threadpool(analyze_contour_map, data, name, opts)
+        except ContourParseError as exc:
+            log.warning("contour_parse_failed", filename=name, detail=str(exc))
+            raise _as_unanswerable(exc, name) from exc
 
     body = result.as_dict()
     # Hand back a handle on the interpolated DEM so the caller can ask for
     # terrain tiles (POST /terrain/derivatives) without uploading the file a
     # second time. The analysis already holds the grid; re-parsing 6 MB of KML to
     # get back to it would be pure waste.
-    body["dem_id"] = _remember(result.parsed, result.dem, result.interpolation)
+    body["dem_id"] = dem_cache.remember_analysis(result)
     # Contours are attached by `ContourAnalysis.as_dict()` now, so both this
     # endpoint and the async job path get them from one place.
     log.info(
@@ -311,10 +333,11 @@ _ANALYZE_DESCRIPTION = (
     "the strategy that succeeded is reported. Contour interval, extent, working UTM "
     "zone and grid resolution are all derived from the file -- nothing is assumed "
     "about any particular map.\n\n"
-    "Send the file and any options together as `multipart/form-data`:\n\n"
+    "Send the map as `multipart/form-data` field **`contour_map`** (required; `file` "
+    "is accepted as an alias). Every other field is optional:\n\n"
     "```\n"
     "curl -X POST http://localhost:8000/api/v1/analyzeContour \\\n"
-    "  -F 'file=@contours_1m.kml' -F 'max_sites=3'\n"
+    "  -F 'contour_map=@contours_1m.kml' -F 'max_sites=3'\n"
     "```"
 )
 
@@ -355,6 +378,85 @@ async def find_catchment(
     return await _run(_one_upload(contour_map, file), opts)
 
 
+def area_options(request: AnalyzeAreaRequest) -> ContourAnalysisOptions:
+    """The request's options as the pipeline's. Shared with the job route."""
+    return ContourAnalysisOptions(
+        max_sites=request.max_sites,
+        max_slope_pct=request.max_slope_pct,
+        enrich=request.enrich,
+        include_contours=request.include_contours,
+        include_catchment_geometry=request.include_catchment_geometry,
+    )
+
+
+def area_problem(exc: Exception) -> Exception:
+    """A drawn area's failure as the problem document a caller can act on."""
+    if isinstance(exc, area_service.AreaTooLargeError):
+        return AoiTooLargeProblem(
+            detail=str(exc), area_km2=round(exc.area_km2, 2), max_km2=exc.max_km2
+        )
+    if isinstance(exc, area_service.AreaError):
+        return ValidationProblem(detail=str(exc), errors=[{"field": "bbox", "message": str(exc)}])
+    failure = area_service.terrain_failure(exc)
+    if failure is not None:
+        kind, detail = failure
+        if kind == "no_terrain":
+            return UnanswerableProblem(detail=detail)
+        return ProviderUnavailableProblem(detail=detail)
+    raise exc
+
+
+_ANALYZE_AREA_DESCRIPTION = (
+    "Analyse a rectangle drawn on the map, with no file to upload. Terrain comes "
+    "from the Copernicus GLO-30 global elevation model at its native 30 m; the "
+    "response has **the same shape as `/analyzeContour`**, with `contour_map` null "
+    "and `terrain_source` saying where the terrain came from.\n\n"
+    "Sites are proposed only inside the rectangle. The terrain is fetched 500 m "
+    "beyond it, so a catchment that begins outside the line you drew is still "
+    "measured whole.\n\n"
+    "Only `bbox` is required -- `[min_lon, min_lat, max_lon, max_lat]` in degrees, "
+    "between 0.1 km² and 100 km²:\n\n"
+    "```\n"
+    "curl -X POST http://localhost:8000/api/v1/analyzeArea \\\n"
+    "  -H 'Content-Type: application/json' \\\n"
+    "  -d '{\"bbox\": [81.2814, 21.2398, 81.3126, 21.2636]}'\n"
+    "```\n\n"
+    "`summary` at the top of the response holds the three headline results: pond "
+    "location, catchment area and the water volume that can be collected."
+)
+
+
+@router.post(
+    "/analyzeArea",
+    response_model=ContourAnalysisResponse,
+    summary="Analyse a rectangle drawn on the map and return pond sites with their catchments",
+    description=_ANALYZE_AREA_DESCRIPTION,
+)
+async def analyze_area_endpoint(request: AnalyzeAreaRequest) -> Any:
+    # The box is checked before a slot is taken: a malformed request is a 400
+    # whether or not the server is busy.
+    try:
+        area_service.validate_bbox(request.bbox, max_km2=float(get_settings().MAX_AOI_KM2))
+    except area_service.AreaError as exc:
+        raise area_problem(exc) from exc
+    with analysis_slot():
+        try:
+            result = await run_in_threadpool(analyze_area, request.bbox, area_options(request))
+        except (area_service.AreaError, ProviderUnavailableError) as exc:
+            raise area_problem(exc) from exc
+    body = result.as_dict()
+    body["dem_id"] = dem_cache.remember_analysis(result)
+    log.info(
+        "area_analysis_complete",
+        analysis_id=result.analysis_id,
+        bbox=request.bbox,
+        area_km2=result.source.area.area_km2 if result.source.area else None,
+        sites=len(result.sites),
+        elapsed_s=round(result.elapsed_s, 2),
+    )
+    return body
+
+
 @router.post(
     "/terrain/contour-map",
     response_model=ContourMapUploadResponse,
@@ -384,11 +486,13 @@ async def upload_contour_map(
         dem_local, report_local = contours_to_dem(parsed_local, cell_size_m=cell_size_m)
         return parsed_local, dem_local, report_local
 
-    try:
-        parsed, dem, report = await run_in_threadpool(_parse)
-    except ContourParseError as exc:
-        log.warning("contour_parse_failed", filename=name, detail=str(exc))
-        raise _as_unanswerable(exc, name) from exc
+    # Interpolating a sheet is most of an analysis's memory, so it takes a slot too.
+    with analysis_slot():
+        try:
+            parsed, dem, report = await run_in_threadpool(_parse)
+        except ContourParseError as exc:
+            log.warning("contour_parse_failed", filename=name, detail=str(exc))
+            raise _as_unanswerable(exc, name) from exc
 
     dem_id = _remember(parsed, dem, report)
     return {
@@ -415,7 +519,9 @@ async def upload_contour_map(
     ),
 )
 async def terrain_derivatives(
-    dem_id: Annotated[str, Form(description="From POST /terrain/contour-map.")],
+    dem_id: Annotated[
+        str, Form(description="From /analyzeContour, /analyzeArea or /terrain/contour-map.")
+    ],
     products: Annotated[
         str,
         Form(description="Comma-separated: dem, slope, hillshade. Default all three."),
@@ -513,6 +619,56 @@ async def terrain_derivatives(
     }
 
 
+@router.get(
+    "/terrain/{dem_id}/overlays",
+    summary="Slope and shaded relief as map images, with no tile server",
+    description=(
+        "For each layer, the URL of a PNG and the four corners it belongs at, in "
+        "the order MapLibre's image source takes them (top-left, top-right, "
+        "bottom-right, bottom-left). This is what the workspace draws: unlike "
+        "`/terrain/derivatives`, it needs no TiTiler, which the lab deployment "
+        "does not run.\n\n"
+        "```\n"
+        "curl http://localhost:8000/api/v1/terrain/<dem_id>/overlays\n"
+        "```"
+    ),
+)
+async def terrain_overlays(dem_id: str) -> Any:
+    entry = dem_cache.get(dem_id)
+    if entry is None:
+        raise NotFoundProblem(detail=f"no terrain with dem_id {dem_id!r}", dem_id=dem_id)
+    return {"dem_id": dem_id, "overlays": overlays.describe(dem_id, entry["dem"])}
+
+
+@router.get(
+    "/terrain/{dem_id}/overlay/{product}",
+    summary="One terrain layer as a PNG (slope or shaded relief)",
+    description=(
+        "The image `/terrain/{dem_id}/overlays` points at: `hillshade` in grey, "
+        "`slope` in the magma ramp over 0-15 %, transparent outside the terrain. "
+        "Rendered once per `dem_id` and cached."
+    ),
+    responses={200: {"content": {"image/png": {}}}},
+)
+async def terrain_overlay_png(dem_id: str, product: str) -> Response:
+    entry = dem_cache.get(dem_id)
+    if entry is None:
+        raise NotFoundProblem(detail=f"no terrain with dem_id {dem_id!r}", dem_id=dem_id)
+    if product not in overlays.PRODUCTS:
+        raise ValidationProblem(
+            detail=f"unknown layer {product!r}; one of {', '.join(overlays.PRODUCTS)}",
+            errors=[{"field": "product", "message": "unknown"}],
+        )
+    store = Path(get_settings().COG_STORE_PATH)
+    png = await run_in_threadpool(
+        overlays.cached_render, dem_id, entry["dem"], product, store  # type: ignore[arg-type]
+    )
+    # A dem_id names one grid for good, so its image never changes.
+    return Response(
+        content=png, media_type="image/png", headers={"Cache-Control": "public, max-age=86400"}
+    )
+
+
 @router.post(
     "/hydrology/catchment",
     summary="Delineate the catchment above any point (M3-9b, FR-4)",
@@ -532,7 +688,9 @@ async def terrain_derivatives(
     ),
 )
 async def hydrology_catchment(
-    dem_id: Annotated[str, Form(description="From /analyzeContour or /terrain/contour-map.")],
+    dem_id: Annotated[
+        str, Form(description="From /analyzeContour, /analyzeArea or /terrain/contour-map.")
+    ],
     lon: Annotated[float, Form(ge=-180, le=180, description="Pour point longitude.")],
     lat: Annotated[float, Form(ge=-90, le=90, description="Pour point latitude.")],
     snap_radius_m: Annotated[
@@ -676,7 +834,9 @@ async def hydrology_catchment(
     ),
 )
 async def hydrology_streams(
-    dem_id: Annotated[str, Form(description="From /analyzeContour or /terrain/contour-map.")],
+    dem_id: Annotated[
+        str, Form(description="From /analyzeContour, /analyzeArea or /terrain/contour-map.")
+    ],
     threshold_ha: Annotated[
         float,
         Form(
@@ -803,7 +963,9 @@ async def hydrology_streams(
     ),
 )
 async def land_available(
-    dem_id: Annotated[str, Form(description="From /analyzeContour or /terrain/contour-map.")],
+    dem_id: Annotated[
+        str, Form(description="From /analyzeContour, /analyzeArea or /terrain/contour-map.")
+    ],
     max_slope_pct: Annotated[
         float,
         Form(
@@ -849,36 +1011,73 @@ async def land_available(
         )
 
     dem = entry["dem"]
-    bounds = entry["parsed"].bounds
+    # From the registry, not off the parsed contours: a drawn area has none.
+    bounds = entry["bounds"]
     unavailable: list[dict[str, str]] = []
 
     def _compute() -> Any:
+        from concurrent.futures import ThreadPoolExecutor, wait
+
         from app.providers.base import ProviderUnavailableError
         from app.providers.landcover.worldcover import fetch_landcover
         from app.providers.vector import osm_cache
         from app.providers.vector.overpass import fetch_osm_context
+        from app.services import provider_cache
 
-        cover = None
-        try:
-            cover = fetch_landcover(bounds.as_tuple(), dem.shape, dem.transform, dem.epsg)
-        except ProviderUnavailableError as exc:
-            unavailable.append(
-                {"layer": "land_cover", "provider": "ESA WorldCover", "reason": exc.detail}
+        settings = get_settings()
+        store = Path(settings.COG_STORE_PATH)
+
+        def _cover() -> Any:
+            # Through the cache the analysis filled for this very grid: read
+            # straight from S3 each time, this took minutes from the lab systems
+            # and the gateway answered 504.
+            return provider_cache.cached_landcover(
+                bounds.as_tuple(),
+                dem.shape,
+                dem.transform,
+                dem.epsg,
+                store,
+                demo_mode=bool(getattr(settings, "DEMO_MODE", False)),
+                fetch=fetch_landcover,
             )
 
+        def _osm() -> Any:
+            return osm_cache.fetch_cached(bounds.as_tuple(), store, fetch=fetch_osm_context)
+
+        jobs = {"land_cover": _cover, **({"osm_features": _osm} if use_osm else {})}
+        providers = {"land_cover": "ESA WorldCover", "osm_features": "Overpass"}
+        # Both at once and under the enrichment's deadline: a layer that has not
+        # arrived is left out and named, as it is in an analysis.
+        pool = ThreadPoolExecutor(max_workers=len(jobs))
+        futures = {name: pool.submit(fn) for name, fn in jobs.items()}
+        try:
+            wait(list(futures.values()), timeout=LAND_BUDGET_S)
+        finally:
+            pool.shutdown(wait=False)
+
+        cover = None
         osm = None
         osm_cached = False
-        if use_osm:
-            try:
-                osm, osm_cached = osm_cache.fetch_cached(
-                    bounds.as_tuple(),
-                    Path(get_settings().COG_STORE_PATH),
-                    fetch=fetch_osm_context,
-                )
-            except (ProviderUnavailableError, ValueError) as exc:
+        for name, future in futures.items():
+            if not future.done():
                 unavailable.append(
-                    {"layer": "osm_features", "provider": "Overpass", "reason": str(exc)}
+                    {
+                        "layer": name,
+                        "provider": providers[name],
+                        "reason": f"did not respond within {LAND_BUDGET_S:g} s; left out",
+                    }
                 )
+                continue
+            try:
+                value = future.result()
+            except (ProviderUnavailableError, ValueError) as exc:
+                reason = exc.detail if isinstance(exc, ProviderUnavailableError) else str(exc)
+                unavailable.append({"layer": name, "provider": providers[name], "reason": reason})
+                continue
+            if name == "land_cover":
+                cover = value
+            else:
+                osm, osm_cached = value
 
         # Buildability belongs on the ORIGINAL ground, not the conditioned
         # surface: filling a depression reports it as 0 % slope, and those are
@@ -1045,7 +1244,9 @@ def _outlet_lonlat(dem: Any, catchment: Any) -> tuple[float, float]:
     ),
 )
 async def terrain_contours(
-    dem_id: Annotated[str, Form(description="From /analyzeContour or /terrain/contour-map.")],
+    dem_id: Annotated[
+        str, Form(description="From /analyzeContour, /analyzeArea or /terrain/contour-map.")
+    ],
     interval_m: Annotated[
         float,
         Form(gt=0, le=500, description="Vertical spacing between contours, in metres."),
@@ -1138,6 +1339,25 @@ async def get_contours(
             dem_id=dem_id,
         )
     parsed = entry["parsed"]
+    if parsed is None:
+        # A drawn area: there are no uploaded lines to echo, so trace them from the
+        # grid at a readable interval -- the same contours its analysis displayed.
+        from app.services.contour_analysis import _display_contours, _display_interval_m
+
+        dem = entry["dem"]
+        interval = _display_interval_m(max(float(dem.relief_m), 1.0))
+        geojson = await run_in_threadpool(_display_contours, dem)
+        finite = dem.elevation[np.isfinite(dem.elevation)]
+        return {
+            "dem_id": dem_id,
+            "contour_interval_m": interval,
+            "levels": len(
+                {f["properties"].get("elevation_m") for f in (geojson or {}).get("features", [])}
+            ),
+            "elevation_range_m": [round(float(finite.min()), 2), round(float(finite.max()), 2)],
+            "geojson": geojson or {"type": "FeatureCollection", "features": []},
+            "traced_from_grid": True,
+        }
     return {
         "dem_id": dem_id,
         "contour_interval_m": parsed.interval_m,

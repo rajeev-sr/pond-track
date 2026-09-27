@@ -69,7 +69,9 @@ def _remember(report_id: str, pdf: bytes, filename: str, job_id: str) -> None:
     ),
 )
 async def generate_report(
-    job_id: Annotated[str, Form(description="From POST /api/v1/analysis.")],
+    job_id: Annotated[
+        str, Form(description="From POST /api/v1/analysis or /api/v1/analysis/area.")
+    ],
 ) -> Any:
     record = get_store().get(job_id)
     if record is None:

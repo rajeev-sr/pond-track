@@ -33,6 +33,7 @@ from fastapi import (
 from pydantic import BaseModel, Field
 
 from app.api.v1.contour import _options_form, _read_upload
+from app.api.v1.slots import refuse_when_queue_full
 from app.core.errors import NotFoundProblem, UnanswerableProblem, ValidationProblem
 from app.core.logging import get_logger
 from app.services import ahp
@@ -367,6 +368,7 @@ async def analyze_suitability(
 
     override = _parse_weights(weights_json)
     data, filename = await _read_upload(_one_upload(contour_map, file))
+    refuse_when_queue_full()
     options = _options_dict(opts)
     if override is not None:
         options["weights_override"] = override

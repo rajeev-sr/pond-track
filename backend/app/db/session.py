@@ -17,6 +17,10 @@ def get_engine() -> Engine:
     return create_engine(
         s.database_url,
         pool_pre_ping=True,  # survives PostGIS restarts without a stale-conn error
+        # Fail in seconds, not the minutes a TCP connect to a host that drops
+        # packets can take: the database is optional here, and a request that
+        # needs it should say so quickly rather than hang.
+        connect_args={"connect_timeout": 3},
         pool_size=5,
         max_overflow=10,
         echo=False,

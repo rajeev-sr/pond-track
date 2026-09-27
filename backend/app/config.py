@@ -97,7 +97,15 @@ class Settings(BaseSettings):
     # Configuration for something the code does not do is worse than no
     # configuration, so it is gone.
 
+    #: A built `frontend/dist` to serve at `/`, or empty to serve the API only.
+    #: Set on the lab deployment, where the API process serves the UI itself
+    #: rather than paying for a Node dev server beside it (see `app/web.py`).
+    FRONTEND_DIST: str = ""
+
     # ── analysis behaviour ───────────────────────────────────────────────────
+    #: Analyses this process runs at once (see `services/capacity.py`). One fits
+    #: a 512 MB lab system; two there was how uvicorn got OOM-killed.
+    MAX_CONCURRENT_ANALYSES: int = Field(1, ge=1, le=16)
     MAX_AOI_KM2: float = 100.0
     DEFAULT_DEM_SOURCE: Literal["COP30", "SRTMGL1", "NASADEM", "AW3D30"] = "COP30"
     AOI_BUFFER_M: float = 500.0

@@ -5,6 +5,11 @@
 /health/ready -- can it actually serve work? Probes DB and Redis and reports
                  per-dependency status plus which provider features are
                  configured. Returns 503 only if a *required* dependency is down.
+                 Redis is optional: with `REDIS_URL` empty, jobs live in the API
+                 process and the check says `not_configured` instead of `down`.
+/health/features -- what this server offers the UI, always 200. A readiness
+                 probe answering 503 is right for an orchestrator and wrong for a
+                 page: the browser logs every 503 as an error.
 """
 
 from __future__ import annotations
@@ -66,11 +71,25 @@ def _probe_redis() -> dict[str, Any]:
         return {"status": "down", "error": f"{type(exc).__name__}: {exc}"[:200]}
 
 
+#: Check statuses that do not make the server unready.
+NOT_DOWN = ("ok", "not_configured")
+
+
 @router.get("/health/ready", summary="Readiness probe")
 async def ready(response: Response) -> dict[str, Any]:
     s = get_settings()
-    checks = {"database": _probe_database(), "redis": _probe_redis()}
-    required_down = [name for name, c in checks.items() if c["status"] != "ok"]
+    checks = {
+        "database": _probe_database(),
+        "redis": (
+            _probe_redis()
+            if s.REDIS_URL
+            else {
+                "status": "not_configured",
+                "detail": "jobs are kept in the API process that runs them",
+            }
+        ),
+    }
+    required_down = [name for name, c in checks.items() if c["status"] not in NOT_DOWN]
     if required_down:
         response.status_code = 503
     return {
@@ -80,4 +99,37 @@ async def ready(response: Response) -> dict[str, Any]:
             f: ("available" if s.is_available(f) else f"missing: {', '.join(s.missing_for(f))}")
             for f in s.FEATURE_REQUIREMENTS
         },
+    }
+
+
+#: How long a database check is trusted. Every page load asks; the answer
+#: changes when someone starts or stops Postgres, which is rare.
+FEATURES_TTL_S = 30.0
+_features_cache: tuple[float, dict[str, Any]] | None = None
+
+
+@router.get("/health/features", summary="What this server can offer the UI")
+async def features() -> dict[str, Any]:
+    """Always 200. Village search needs the village register database, which not
+    every lab system has; the page asks here and hides the field when it is
+    absent, rather than offering a search that can only answer with an error."""
+    from fastapi.concurrency import run_in_threadpool
+
+    from app.services import capacity
+
+    global _features_cache
+    now = time.monotonic()
+    if _features_cache is None or now - _features_cache[0] > FEATURES_TTL_S:
+        database = await run_in_threadpool(_probe_database)
+        _features_cache = (now, database)
+    database = _features_cache[1]
+    s = get_settings()
+    return {
+        "village_search": {
+            "available": database["status"] == "ok",
+            "reason": None if database["status"] == "ok" else "no village register database",
+        },
+        "analyses": capacity.get_slots().snapshot(),
+        "max_area_km2": s.MAX_AOI_KM2,
+        "max_upload_mb": 50,
     }
