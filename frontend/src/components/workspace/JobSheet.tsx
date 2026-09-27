@@ -28,7 +28,7 @@ const MODES: { id: InputMode; label: string }[] = [
  */
 export function JobSheet() {
   const {
-    analysis, options, setOptions, busy, jobStatus, analyse, cancel,
+    analysis, options, setOptions, busy, jobStatus, connection, analyse, cancel,
     land, loadingLand, loadLand, village, villageNote, selectVillage, clearVillage,
     inputMode, setInputMode, drawnArea, setDrawnArea, drawing, setDrawing,
     pickSampleArea, analyseArea,
@@ -185,9 +185,23 @@ export function JobSheet() {
             Run
           </button>
         )}
+        {busy && !jobStatus && (
+          // Before the server has answered at all: say so, rather than showing
+          // a pressed button and nothing else while a connection stalls.
+          <div className="job" role="status" aria-live="polite" style={{ marginTop: 14 }}>
+            <div className="job-head">
+              <span>{connection ?? "Contacting the server…"}</span>
+            </div>
+          </div>
+        )}
         {busy && jobStatus && (
           <div style={{ marginTop: 14 }}>
             <JobProgress status={jobStatus} />
+            {connection && (
+              <p role="status" style={{ fontSize: 12, color: "var(--ink-3)", marginTop: 6 }}>
+                {connection}
+              </p>
+            )}
           </div>
         )}
       </section>

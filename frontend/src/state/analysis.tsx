@@ -2,6 +2,7 @@ import {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -17,6 +18,8 @@ import {
   fetchLandAvailability,
   fetchStreams,
   fetchVillageBoundary,
+  keepConnectionWarm,
+  type OnRetry,
 } from "../api/client";
 import type {
   AnalyzeOptions,
@@ -116,6 +119,9 @@ export interface AnalysisState {
   clearVillage: () => void;
   busy: boolean;
   jobStatus: JobStatus | null;
+  /** Why a run is waiting when the server is not the reason: contacting it,
+   *  or sending a stalled request again. Null once the server answers. */
+  connection: string | null;
   error: ApiError | Error | null;
   problem: Problem | null;
   clearError: () => void;
@@ -180,6 +186,11 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
   const villageAbort = useRef<AbortController | null>(null);
   const [busy, setBusy] = useState(false);
   const [jobStatus, setJobStatus] = useState<JobStatus | null>(null);
+  const [connection, setConnection] = useState<string | null>(null);
+
+  // One open connection for the next Run: on the campus network it is new
+  // connections that stall (see `keepConnectionWarm`).
+  useEffect(() => keepConnectionWarm(), []);
   const [error, setError] = useState<ApiError | Error | null>(null);
   const abort = useRef<AbortController | null>(null);
   const [inputMode, setInputMode] = useState<InputMode>("upload");
@@ -238,7 +249,11 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
    *  run -- is the same whichever way the terrain came in. */
   const run = useCallback(
     async (
-      start: (onProgress: (s: JobStatus) => void, signal: AbortSignal) => Promise<ContourAnalysis>,
+      start: (
+        onProgress: (s: JobStatus) => void,
+        signal: AbortSignal,
+        onRetry: OnRetry,
+      ) => Promise<ContourAnalysis>,
     ) => {
       abort.current?.abort();
       const controller = new AbortController();
@@ -246,8 +261,20 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
       setBusy(true);
       setError(null);
       setJobStatus(null);
+      setConnection("Contacting the server…");
       try {
-        const result = await start(setJobStatus, controller.signal);
+        const result = await start(
+          (status) => {
+            setConnection(null);
+            setJobStatus(status);
+          },
+          controller.signal,
+          (attempt, tries) =>
+            setConnection(
+              `The connection stalled; sending the request again (try ${attempt} of ${tries})…`,
+            ),
+        );
+        setConnection(null);
         setAnalysis(result);
         setShownSites(result.candidate_sites.length);
         setSelectedRank(result.recommended_site?.rank ?? null);
@@ -281,6 +308,7 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
         setStreamSummary(null);
       } finally {
         setBusy(false);
+        setConnection(null);
       }
     },
     [loadStreams],
@@ -288,15 +316,17 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
 
   const analyse = useCallback(
     (file: File) =>
-      run((onProgress, signal) => analyzeContourAsJob(file, options, onProgress, signal)),
+      run((onProgress, signal, onRetry) =>
+        analyzeContourAsJob(file, options, onProgress, signal, onRetry),
+      ),
     [run, options],
   );
 
   const analyseArea = useCallback(
     (bbox: Bbox) => {
       setDrawing(false);
-      return run((onProgress, signal) =>
-        analyzeAreaAsJob(roundBbox(bbox), options, onProgress, signal),
+      return run((onProgress, signal, onRetry) =>
+        analyzeAreaAsJob(roundBbox(bbox), options, onProgress, signal, onRetry),
       );
     },
     [run, options],
@@ -425,6 +455,7 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
       },
       busy,
       jobStatus,
+      connection,
       error,
       problem: error instanceof ApiError ? error.problem : null,
       clearError: () => setError(null),
@@ -455,7 +486,7 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
     [
       analysis, shownAnalysis, options, layers, basemap, selectedRank, shownSites,
       terrain, streams, streamSummary, streamScope, loadingStreams, explored,
-      exploring, land, loadingLand, village, villageNote, busy, jobStatus, error,
+      exploring, land, loadingLand, village, villageNote, busy, jobStatus, connection, error,
       analyse, explore, loadLand, loadStreams, selectVillage,
       inputMode, drawnArea, drawing, frameAreaKey, analyseArea,
     ],

@@ -50,6 +50,113 @@ function api(url: string, init: RequestInit = {}): Promise<Response> {
   return fetch(url, { ...init, headers });
 }
 
+/** A request that got no answer at all: the connection failed, not the server. */
+export class NetworkError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "NetworkError";
+  }
+}
+
+/** Called before a request is sent again, so the page can say why it waits. */
+export type OnRetry = (attempt: number, tries: number) => void;
+
+function sleep(ms: number, signal?: AbortSignal | null): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timer);
+        reject(new DOMException("aborted", "AbortError"));
+      },
+      { once: true },
+    );
+  });
+}
+
+/**
+ * `api` with a deadline, sent again on a fresh connection when nothing answers.
+ *
+ * From the campus Wi-Fi about half of all new connections to the lab address
+ * hang instead of failing, and a browser waits about 90 s on one before giving
+ * up: with Run pressed the page showed nothing at all. A request with no answer
+ * by its deadline is abandoned and sent again. Only a missing answer is retried
+ * -- an HTTP error is an answer -- and a request the caller cancelled is not.
+ */
+async function request(
+  url: string,
+  init: RequestInit,
+  { timeoutMs, tries, onRetry }: { timeoutMs: number; tries: number; onRetry?: OnRetry },
+): Promise<Response> {
+  const outer = init.signal;
+  for (let attempt = 1; ; attempt++) {
+    if (outer?.aborted) throw new DOMException("aborted", "AbortError");
+    const controller = new AbortController();
+    const stop = () => controller.abort();
+    outer?.addEventListener("abort", stop, { once: true });
+    const timer = setTimeout(stop, timeoutMs);
+    try {
+      return await api(url, { ...init, signal: controller.signal });
+    } catch (err) {
+      if (outer?.aborted) throw err;
+      if (attempt >= tries) {
+        throw new NetworkError(
+          `The server did not answer: the network between this browser and the server ` +
+            `dropped the connection ${tries} times in a row. Check the connection and press ` +
+            `Run again.`,
+        );
+      }
+      onRetry?.(attempt + 1, tries);
+      await sleep(Math.min(1000 * attempt, 3000), outer);
+    } finally {
+      clearTimeout(timer);
+      outer?.removeEventListener("abort", stop);
+    }
+  }
+}
+
+/** A one-off key per job start, so a start sent twice is recognised as one. */
+function startKey(): string {
+  return Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) =>
+    b.toString(16).padStart(2, "0"),
+  ).join("");
+}
+
+/** Deadlines, and attempts before giving up. A start answers at once; a contour
+ *  upload is up to 50 MB; a result can be a few megabytes. */
+const START_TIMEOUT_MS = 20_000;
+const UPLOAD_TIMEOUT_MS = 120_000;
+const POLL_TIMEOUT_MS = 10_000;
+const RESULT_TIMEOUT_MS = 60_000;
+const START_TRIES = 4;
+const POLL_TRIES = 6;
+
+/** How often a page in view touches the server, below every idle timeout on the
+ *  way (the gateway's two minutes, a browser's own). */
+const KEEP_WARM_MS = 25_000;
+
+/**
+ * Keep a connection to the server open while the page is in view.
+ *
+ * On the campus network it is new connections that hang; one already open keeps
+ * working. A small request every 25 s means the next Run reuses an open
+ * connection instead of opening one. Returns the function that stops it.
+ */
+export function keepConnectionWarm(): () => void {
+  const ping = () => {
+    if (document.visibilityState !== "visible") return;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8_000);
+    api(`${BASE}/health`, { signal: controller.signal, cache: "no-store" })
+      .then((r) => r.arrayBuffer()) // read it, so the connection goes back to the pool
+      .catch(() => undefined)
+      .finally(() => clearTimeout(timer));
+  };
+  const id = window.setInterval(ping, KEEP_WARM_MS);
+  return () => window.clearInterval(id);
+}
+
 /** A plain link (a download) cannot carry a header, so it carries the id. */
 export function withClient(url: string): string {
   return `${url}${url.includes("?") ? "&" : "?"}client=${CLIENT_ID}`;
@@ -299,6 +406,7 @@ export async function analyzeContourAsJob(
   options: AnalyzeOptions,
   onProgress: (status: JobStatus) => void,
   signal?: AbortSignal,
+  onRetry?: OnRetry,
 ): Promise<ContourAnalysis> {
   const form = new FormData();
   form.append("file", file);
@@ -309,12 +417,12 @@ export async function analyzeContourAsJob(
   if (options.cellSizeM !== null)
     form.append("cell_size_m", String(options.cellSizeM));
 
-  const accepted = await api(`${BASE}/analysis`, {
-    method: "POST",
-    body: form,
-    signal,
-  });
-  return followJob(accepted, onProgress, signal);
+  const accepted = await request(
+    `${BASE}/analysis`,
+    { method: "POST", body: form, headers: { "Idempotency-Key": startKey() }, signal },
+    { timeoutMs: UPLOAD_TIMEOUT_MS, tries: START_TRIES, onRetry },
+  );
+  return followJob(accepted, onProgress, signal, onRetry);
 }
 
 /**
@@ -329,20 +437,25 @@ export async function analyzeAreaAsJob(
   options: AnalyzeOptions,
   onProgress: (status: JobStatus) => void,
   signal?: AbortSignal,
+  onRetry?: OnRetry,
 ): Promise<ContourAnalysis> {
-  const accepted = await api(`${BASE}/analysis/area`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      bbox,
-      max_sites: options.maxSites,
-      max_slope_pct: options.maxSlopePct,
-      enrich: options.enrich,
-      include_contours: options.includeContours,
-    }),
-    signal,
-  });
-  return followJob(accepted, onProgress, signal);
+  const accepted = await request(
+    `${BASE}/analysis/area`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Idempotency-Key": startKey() },
+      body: JSON.stringify({
+        bbox,
+        max_sites: options.maxSites,
+        max_slope_pct: options.maxSlopePct,
+        enrich: options.enrich,
+        include_contours: options.includeContours,
+      }),
+      signal,
+    },
+    { timeoutMs: START_TIMEOUT_MS, tries: START_TRIES, onRetry },
+  );
+  return followJob(accepted, onProgress, signal, onRetry);
 }
 
 /** Poll an accepted job to the end and return its result. */
@@ -350,6 +463,7 @@ async function followJob(
   accepted: Response,
   onProgress: (status: JobStatus) => void,
   signal?: AbortSignal,
+  onRetry?: OnRetry,
 ): Promise<ContourAnalysis> {
   if (!accepted.ok) throw new ApiError(await toProblem(accepted));
   const start = (await accepted.json()) as JobStart;
@@ -359,9 +473,11 @@ async function followJob(
   // making progress.
   for (;;) {
     if (signal?.aborted) throw new DOMException("aborted", "AbortError");
-    const response = await api(`${BASE}/analysis/${start.job_id}/status`, {
-      signal,
-    });
+    const response = await request(
+      `${BASE}/analysis/${start.job_id}/status`,
+      { signal },
+      { timeoutMs: POLL_TIMEOUT_MS, tries: POLL_TRIES, onRetry },
+    );
     if (!response.ok) throw new ApiError(await toProblem(response));
     const status = (await response.json()) as JobStatus;
     onProgress(status);
@@ -386,9 +502,11 @@ async function followJob(
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
   }
 
-  const finished = await api(`${BASE}/analysis/${start.job_id}/result`, {
-    signal,
-  });
+  const finished = await request(
+    `${BASE}/analysis/${start.job_id}/result`,
+    { signal },
+    { timeoutMs: RESULT_TIMEOUT_MS, tries: START_TRIES, onRetry },
+  );
   if (!finished.ok) throw new ApiError(await toProblem(finished));
   const body = (await finished.json()) as { result: ContourAnalysis };
   // Older servers did not stamp the job id onto the result; the export link

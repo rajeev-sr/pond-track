@@ -1,0 +1,29 @@
+% High-level architecture of the deployed system.
+% Needs \usepackage{tikz} and \usetikzlibrary{positioning,arrows.meta,fit}.
+\begin{tikzpicture}[
+    font=\footnotesize,
+    box/.style={draw, rounded corners=2pt, align=center, inner sep=4pt, fill=white},
+    group/.style={draw, rounded corners=4pt, dashed, inner sep=5pt},
+    arr/.style={-{Stealth[length=2.2mm]}, thick},
+    dsh/.style={-{Stealth[length=2mm]}, dashed}]
+
+  \node[box, text width=2.3cm] (browser) {\textbf{Browser}\\React + TypeScript\\MapLibre GL map\\draw area / upload KML};
+  \node[box, text width=2.5cm, right=8mm of browser] (gw) {\textbf{Gateway}\\nginx on sys2\\public \texttt{:3274}\\hash on browser id};
+
+  \node[box, text width=3.4cm, right=9mm of gw, yshift=11mm] (a2) {\textbf{API} on sys2 \texttt{:4000}};
+  \node[box, text width=3.4cm, below=2.5mm of a2] (a3) {\textbf{API} on sys3 \texttt{:4000}};
+  \node[box, text width=3.4cm, below=2.5mm of a3] (a4) {\textbf{API} on sys4 \texttt{:4000}};
+  \node[box, text width=3.4cm, below=3mm of a4, fill=gray!8] (disk) {each system's disk: 26 DEM tiles,\\terrain grids, soil, land-cover\\and OSM caches};
+  \node[group, fit=(a2)(a3)(a4)(disk),
+        label={[font=\scriptsize, align=center]below:{FastAPI: web page + REST API, job runner,\\one analysis at a time, queue of 8}}] (apis) {};
+
+  \node[box, text width=2.8cm, right=9mm of apis.east |- a2, anchor=west, fill=gray!8] (ext) {\textbf{Public data}\\Copernicus DEM, WorldCover,\\SoilGrids, NASA POWER,\\Open-Meteo, Overpass};
+  \node[box, text width=2.8cm, right=9mm of apis.east |- disk, anchor=west, fill=gray!8] (db) {\textbf{PostgreSQL + PostGIS}\\on sys4 \texttt{:5432}\\village register,\\rainfall cache};
+
+  \draw[arr] (browser) -- node[above, font=\scriptsize] {HTTP} (gw);
+  \draw[arr] (gw.east) -- (a2.west);
+  \draw[arr] (gw.east) -- (a3.west);
+  \draw[arr] (gw.east) -- (a4.west);
+  \draw[dsh] (apis.east |- ext) -- node[above, font=\scriptsize] {best effort} (ext.west);
+  \draw[arr] (apis.east |- db) -- node[above, font=\scriptsize] {SQL} (db.west);
+\end{tikzpicture}

@@ -189,7 +189,11 @@ export function Workspace() {
         {s.error && (
           <div className="overlay overlay--error" role="alert">
             <span className="stamp" style={{ display: "block", marginBottom: 6 }}>
-              {s.inputMode === "area" ? "Could not analyse this area" : "Could not analyse this file"}
+              {s.error.name === "NetworkError"
+                ? "Could not reach the server"
+                : s.inputMode === "area"
+                  ? "Could not analyse this area"
+                  : "Could not analyse this file"}
             </span>
             <p style={{ fontSize: 13.5, color: "var(--ink-2)" }}>
               {s.problem?.detail ?? s.error.message}
