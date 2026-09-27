@@ -50,6 +50,30 @@ INDIA_LEVELS: dict[str, str] = {
     "ADM4": "cd_block",
 }
 
+#: Other names geoBoundaries has published for the same level. It relabelled
+#: India's ADM1 "State / Union Territory" in 2026 -- a more accurate name for the
+#: same 36 units, not a redefinition -- and the check below refused to seed
+#: until it knew the new name. A genuine change (sub-districts replaced by CD
+#: blocks) still stops the seed, which is what the check is for.
+LEVEL_ALIASES: dict[str, frozenset[str]] = {
+    "ADM1": frozenset({"state/union territory", "state / union territory"}),
+}
+
+
+def same_level(level: str, canonical: str) -> bool:
+    """Whether geoBoundaries' label for `level` still names what `INDIA_LEVELS`
+    says it does. Compared on letters alone: "Sub-District" is "subdistrict"."""
+    expected = INDIA_LEVELS.get(level.upper())
+    if not expected or not canonical:
+        return True
+
+    def squash(label: str) -> str:
+        return "".join(ch for ch in label.lower() if ch.isalnum() or ch == "/")
+
+    accepted = {squash(expected)} | {squash(a) for a in LEVEL_ALIASES.get(level.upper(), ())}
+    return squash(canonical) in accepted
+
+
 LICENCE = "ODbL 1.0 (geoBoundaries, gbOpen)"
 SOURCE_NAME = "geoboundaries"
 
@@ -126,13 +150,7 @@ def download(
     meta = metadata(iso3, level, client=client)
     canonical = str(meta.get("boundaryCanonical") or "").strip().lower()
     expected = INDIA_LEVELS.get(level.upper())
-    # "Sub-District" against "subdistrict"; compare on letters alone.
-    if (
-        iso3.upper() == "IND"
-        and expected
-        and canonical
-        and canonical.replace("-", "").replace(" ", "") != expected.replace("_", "")
-    ):
+    if iso3.upper() == "IND" and not same_level(level, canonical):
         raise GeoBoundariesError(
             f"{level} now means {canonical!r} for {iso3}, not {expected!r}. "
             "Refusing to seed a level whose meaning changed."

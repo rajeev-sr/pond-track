@@ -1,30 +1,37 @@
-"""End-to-end contour-map analysis (MC-11).
+"""End-to-end analysis (MC-11): a contour map, or a rectangle drawn on the map.
 
-Orchestrates the pipeline behind `POST /analyzeContour`:
+Two ways in, one pipeline:
 
-    KML/KMZ -> parse -> interpolate to a metric DEM -> condition (Priority-Flood)
-            -> D8 flow routing -> pond siting -> catchment per candidate -> JSON
+    KML/KMZ   -> parse -> interpolate to a metric DEM --.
+                                                         >-> condition (Priority-Flood)
+    rectangle -> Copernicus GLO-30 for the box ---------'   -> D8 flow routing
+              -> pond siting -> catchment per candidate -> JSON
 
-Every stage below `parse` is shared with the remote-DEM path (HLD ADR-7): the
-contour file supplies a `DemGrid` and nothing downstream knows or cares where it
-came from. That is why adding a terrain input costs one adapter rather than a
-second pipeline.
+Everything below the DEM is shared (HLD ADR-7): the source supplies a `DemGrid`
+and nothing downstream knows or cares where it came from. That is why the drawn
+area cost one adapter rather than a second pipeline.
 """
 
 from __future__ import annotations
 
 import time
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Protocol
+from pathlib import Path
+from typing import Any, Literal, Protocol
 
 import numpy as np
 import numpy.typing as npt
 
-from app.providers.elevation.base import DemGrid
+from app.core.crs import is_within_india
+from app.providers.elevation import copernicus_aws
+from app.providers.elevation.base import Bounds, DemGrid
 from app.providers.elevation.contour_kml import ParsedContours, parse_contour_file
 from app.providers.rainfall import ensemble as rainfall_ensemble
+from app.services import area as area_service
+from app.services import contours as contour_generator
 from app.services import explain, indian_runoff, siting, water_balance
 from app.services import hydrology as hyd
 from app.services import pond as pond_design
@@ -32,6 +39,7 @@ from app.services import runoff as runoff_service
 from app.services.enrichment import Enrichment, fetch_enrichment
 from app.services.geometry import (
     bbox_geojson,
+    contour_lines_to_geojson,
     contours_to_geojson,
     mask_to_geojson,
     point_geojson,
@@ -44,6 +52,12 @@ DEFAULT_SNAP_RADIUS_M = 150.0
 
 #: Upstream area above which a cell is treated as part of the stream network.
 DEFAULT_STREAM_THRESHOLD_HA = 5.0
+
+#: Display contours for a drawn area are traced from the grid at the first of
+#: these intervals giving no more than this many levels -- dense enough to read
+#: the terrain, sparse enough not to bury the map.
+DISPLAY_INTERVALS_M = (1.0, 2.0, 5.0, 10.0, 20.0, 25.0, 50.0, 100.0, 200.0)
+MAX_DISPLAY_LEVELS = 40
 
 
 @dataclass
@@ -92,14 +106,51 @@ class ContourAnalysisOptions:
         }
 
 
+SourceKind = Literal["uploaded_contour_map", "copernicus_glo30"]
+
+
+@dataclass
+class TerrainSource:
+    """Where the DEM came from, and what the response should say about it.
+
+    `bounds` is the area of interest a person chose -- the sheet's extent, or the
+    rectangle they drew. `grid_bounds` is everything the grid covers, which for a
+    drawn area includes a buffer so catchments starting outside the rectangle are
+    measured whole; enrichment is laid onto all of it.
+    """
+
+    kind: SourceKind
+    bounds: Bounds
+    grid_bounds: Bounds
+    info: dict[str, Any]
+    parsed: ParsedContours | None = None
+    interpolation: InterpolationReport | None = None
+    area: area_service.AnalysisArea | None = None
+    filename: str | None = None
+    size_bytes: int = 0
+    warnings: list[str] = field(default_factory=list)
+
+    def input_block(self, options: ContourAnalysisOptions) -> dict[str, Any]:
+        if self.area is not None:
+            return {
+                "bbox": self.area.as_list(),
+                "area_km2": self.area.area_km2,
+                "options": options.as_dict(),
+            }
+        return {
+            "filename": self.filename,
+            "size_bytes": self.size_bytes,
+            "options": options.as_dict(),
+        }
+
+
 @dataclass
 class ContourAnalysis:
     """The assembled result. `as_dict()` is the API response body."""
 
     analysis_id: str
-    parsed: ParsedContours
+    source: TerrainSource
     dem: DemGrid
-    interpolation: InterpolationReport
     conditioned: hyd.ConditionedDem
     flow: hyd.FlowGrids
     siting_result: siting.SitingResult
@@ -109,27 +160,44 @@ class ContourAnalysis:
     stage_timings: dict[str, float]
     options: ContourAnalysisOptions
     exclusions: Any | None = None
-    source_filename: str | None = None
-    source_bytes: int = 0
     generated_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     warnings: list[str] = field(default_factory=list)
 
+    # Kept as properties so every caller written against the contour-only result
+    # -- the endpoint, the job runner, the DEM registry -- reads the same names.
+    @property
+    def parsed(self) -> ParsedContours | None:
+        return self.source.parsed
+
+    @property
+    def interpolation(self) -> InterpolationReport | None:
+        return self.source.interpolation
+
+    @property
+    def source_filename(self) -> str | None:
+        return self.source.filename
+
+    @property
+    def source_bytes(self) -> int:
+        return self.source.size_bytes
+
     def as_dict(self) -> dict[str, Any]:
-        b = self.parsed.bounds
+        src = self.source
         recommended = self.sites[0] if self.sites else None
         body: dict[str, Any] = {
             "analysis_id": self.analysis_id,
             "generated_at": self.generated_at,
             "elapsed_s": round(self.elapsed_s, 3),
             "stage_timings_s": {k: round(v, 3) for k, v in self.stage_timings.items()},
-            "input": {
-                "filename": self.source_filename,
-                "size_bytes": self.source_bytes,
-                "options": self.options.as_dict(),
-            },
-            "contour_map": self.parsed.summary(),
+            "input": src.input_block(self.options),
+            # The three results the brief asks for, at the top where a reader
+            # looks first. Everything here is also in `recommended_site`; this is
+            # the index, not a second computation.
+            "summary": _summary(recommended),
+            "terrain_source": src.info,
+            "contour_map": None if src.parsed is None else src.parsed.summary(),
             "interpolated_terrain": {
-                **self.interpolation.as_dict(),
+                **self._grid_report(),
                 "depressions_filled_cells": self.conditioned.filled_cells,
                 "deepest_depression_m": round(self.conditioned.max_fill_depth_m, 3),
                 "outlet_cells": self.conditioned.outlet_cells,
@@ -139,7 +207,7 @@ class ContourAnalysis:
                     int(self.flow.accumulation.max()) * self.dem.cell_size_m**2 / 10_000.0, 3
                 ),
             },
-            "area_of_interest": bbox_geojson(*b.as_tuple()),
+            "area_of_interest": bbox_geojson(*src.bounds.as_tuple()),
             "suitability": {
                 "analysis_tier": self.enrichment.tier,
                 "tier_meaning": self.enrichment.as_dict()["tier_meaning"],
@@ -163,19 +231,41 @@ class ContourAnalysis:
         # the same analysis must always produce the same words, and every clause
         # has to trace to a named field.
         body["explanation"] = explain.explain_analysis(body)
-        # Attached here rather than by the endpoint. It used to be the caller's
-        # job, and the async path did not know to do it -- so an analysis run as
-        # a job came back with no contours at all, which emptied the map's
-        # contour layer and the GeoJSON export with it. `as_dict()` owns the
-        # whole document and the deciding option lives on the analysis, so this
-        # is the one place it cannot be forgotten.
+        # Attached here rather than by the endpoint, so both the synchronous and
+        # the job path get them from one place. A drawn area has no uploaded
+        # lines to echo, so its contours are traced from the grid instead.
         if self.options.include_contours:
-            body["contours"] = contours_to_geojson(self.parsed.lines)
+            body["contours"] = (
+                contours_to_geojson(src.parsed.lines)
+                if src.parsed is not None
+                else _display_contours(self.dem)
+            )
         return body
+
+    def _grid_report(self) -> dict[str, Any]:
+        """The grid's own facts: the interpolation report for a contour map, the
+        fetched grid's provenance for a drawn area."""
+        if self.source.interpolation is not None:
+            return self.source.interpolation.as_dict()
+        prov = self.dem.provenance
+        rows, cols = self.dem.shape
+        return {
+            "grid_resolution_m": self.dem.cell_size_m,
+            "grid_resolution_derived": False,
+            "grid_size": [cols, rows],
+            "grid_cells": rows * cols,
+            "interpolation_method": (
+                "none: Copernicus GLO-30 resampled bilinearly onto the working grid"
+            ),
+            "coverage_pct": prov.get("coverage_pct"),
+            "interpolated_elevation_min_m": prov.get("elevation_min_m"),
+            "interpolated_elevation_max_m": prov.get("elevation_max_m"),
+            "interpolated_relief_m": prov.get("relief_m"),
+        }
 
 
 class StageReporter(Protocol):
-    """What `analyze_contour_map` needs in order to report progress.
+    """What the pipeline needs in order to report progress.
 
     Deliberately the subset of `services.jobs.JobProgress` that matters here, so
     a job can be passed straight in while the pipeline keeps no knowledge of job
@@ -185,6 +275,29 @@ class StageReporter(Protocol):
     def start_step(self, name: str) -> None: ...
     def finish_step(self, name: str) -> None: ...
     def fail_step(self, name: str, reason: str) -> None: ...
+
+
+def _stage_runner(reporter: StageReporter | None, timings: dict[str, float]) -> Any:
+    """Time a stage and tell the reporter it started, finished or failed."""
+
+    def stage(name: str, fn: Any) -> Any:
+        t = time.perf_counter()
+        if reporter is not None:
+            reporter.start_step(name)
+        try:
+            out = fn()
+        except Exception as exc:
+            # The reporter is told before the exception propagates, so a failed
+            # job records *which* stage died rather than only that it did.
+            if reporter is not None:
+                reporter.fail_step(name, f"{type(exc).__name__}: {exc}")
+            raise
+        timings[name] = time.perf_counter() - t
+        if reporter is not None:
+            reporter.finish_step(name)
+        return out
+
+    return stage
 
 
 def analyze_contour_map(
@@ -206,29 +319,99 @@ def analyze_contour_map(
     opts = options or ContourAnalysisOptions()
     t_total = time.perf_counter()
     timings: dict[str, float] = {}
-
-    def stage(name: str, fn: Any) -> Any:
-        t = time.perf_counter()
-        if reporter is not None:
-            reporter.start_step(name)
-        try:
-            out = fn()
-        except Exception as exc:
-            # The reporter is told before the exception propagates, so a failed
-            # job records *which* stage died rather than only that it did.
-            if reporter is not None:
-                reporter.fail_step(name, f"{type(exc).__name__}: {exc}")
-            raise
-        timings[name] = time.perf_counter() - t
-        if reporter is not None:
-            reporter.finish_step(name)
-        return out
+    stage = _stage_runner(reporter, timings)
 
     parsed = stage("parse", lambda: parse_contour_file(data, filename))
-    dem_and_report = stage(
+    dem, interp = stage(
         "interpolate", lambda: contours_to_dem(parsed, cell_size_m=opts.cell_size_m)
     )
-    dem, interp = dem_and_report
+    source = TerrainSource(
+        kind="uploaded_contour_map",
+        bounds=parsed.bounds,
+        grid_bounds=parsed.bounds,
+        info=_contour_source_info(parsed, dem, filename),
+        parsed=parsed,
+        interpolation=interp,
+        filename=filename,
+        size_bytes=len(data),
+        warnings=list(parsed.warnings),
+    )
+    return _analyse(dem, source, opts, stage, timings, t_total)
+
+
+def analyze_area(
+    bbox: Sequence[Any],
+    options: ContourAnalysisOptions | None = None,
+    reporter: StageReporter | None = None,
+    *,
+    max_km2: float | None = None,
+    store: Path | None = None,
+    fetch: Any = None,
+) -> ContourAnalysis:
+    """Run the full pipeline on a rectangle drawn on the map.
+
+    `bbox` is `[min_lon, min_lat, max_lon, max_lat]`. It is validated before any
+    stage runs -- a bad box costs no fetch -- and raises `area.AreaError` (or its
+    `AreaTooLargeError`) saying exactly what is wrong. Terrain comes from
+    Copernicus GLO-30 at its native 30 m, cached on disk; a Copernicus outage
+    raises `ProviderUnavailableError` from the `terrain` stage.
+
+    Sites are proposed only inside the rectangle. The grid extends
+    `AOI_BUFFER_M` beyond it, so a catchment that starts outside the line the
+    user drew is still measured whole.
+    """
+    from app.config import get_settings
+
+    settings = get_settings()
+    opts = options or ContourAnalysisOptions()
+    cap = float(settings.MAX_AOI_KM2 if max_km2 is None else max_km2)
+    box = area_service.validate_bbox(bbox, max_km2=cap)
+    cache_dir = Path(settings.COG_STORE_PATH) if store is None else store
+
+    t_total = time.perf_counter()
+    timings: dict[str, float] = {}
+    stage = _stage_runner(reporter, timings)
+
+    dem, was_cached = stage(
+        "terrain",
+        lambda: copernicus_aws.cached_fetch_dem(
+            box.bounds, store=cache_dir, buffer_m=float(settings.AOI_BUFFER_M), fetch=fetch
+        ),
+    )
+    inside = area_service.inside_mask(dem, box)
+    if not inside.any():
+        raise area_service.AreaError(
+            "the selected rectangle does not cover a single cell of the terrain grid"
+        )
+
+    warnings: list[str] = []
+    lon, lat = box.bounds.centroid
+    if not is_within_india(lon, lat):
+        warnings.append(
+            "the selected area lies outside India; it is analysed all the same, but "
+            "the Indian runoff cross-checks and the village register do not apply"
+        )
+    source = TerrainSource(
+        kind="copernicus_glo30",
+        bounds=box.bounds,
+        grid_bounds=area_service.grid_bounds_4326(dem),
+        info=_area_source_info(box, dem, was_cached, int(inside.sum())),
+        area=box,
+        warnings=warnings,
+    )
+    return _analyse(dem, source, opts, stage, timings, t_total, site_mask=inside)
+
+
+def _analyse(
+    dem: DemGrid,
+    source: TerrainSource,
+    opts: ContourAnalysisOptions,
+    stage: Any,
+    timings: dict[str, float],
+    t_total: float,
+    site_mask: npt.NDArray[np.bool_] | None = None,
+) -> ContourAnalysis:
+    """Everything below the DEM, shared by both ways in."""
     conditioned = stage("condition", lambda: hyd.fill_depressions(dem))
     flow = stage("flow_routing", lambda: hyd.build_flow(dem, conditioned))
 
@@ -237,7 +420,7 @@ def analyze_contour_map(
     enrichment = stage(
         "enrichment",
         lambda: fetch_enrichment(
-            parsed.bounds,
+            source.grid_bounds,
             dem,
             rainfall_years=opts.rainfall_years,
             enabled=opts.enrich,
@@ -248,6 +431,11 @@ def analyze_contour_map(
     # The hard veto on where a pond may go: existing tanks, rivers, buildings,
     # roads. Built here because it needs the flow grid for its terrain fallback.
     exclusions = enrichment.siting_exclusions(dem, flow)
+    # A drawn area holds siting inside the rectangle. The buffer around it is
+    # there for the catchments, not for the sites: a pond outside the land the
+    # person chose would answer a question they did not ask. Kept out of the
+    # exclusion audit, which reports hazards, not the edge of the selection.
+    excluded = exclusions.mask if site_mask is None else (exclusions.mask | ~site_mask)
 
     result = stage(
         "siting",
@@ -263,7 +451,7 @@ def analyze_contour_map(
             min_separation_m=opts.min_separation_m,
             min_depression_depth_m=opts.min_depression_depth_m,
             availability=availability,
-            excluded=exclusions.mask,
+            excluded=excluded,
             layers_used=enrichment.layers_used,
             layers_unavailable=enrichment.layers_unavailable,
             tier=enrichment.tier,
@@ -281,7 +469,7 @@ def analyze_contour_map(
         ],
     )
 
-    warnings = [*parsed.warnings, *conditioned.warnings, *result.warnings]
+    warnings = [*source.warnings, *conditioned.warnings, *result.warnings]
     if enrichment.rainfall:
         warnings.extend(enrichment.rainfall.warnings)
     for failure in enrichment.failures:
@@ -290,16 +478,16 @@ def analyze_contour_map(
             f"continued at tier '{enrichment.tier}'"
         )
     if not sites:
+        where = " inside the selected area" if site_mask is not None else ""
         warnings.append(
-            "no candidate pond site met the constraints; the analysis of the terrain "
-            "itself is still reported above"
+            f"no candidate pond site met the constraints{where}; the analysis of the "
+            "terrain itself is still reported above"
         )
 
     return ContourAnalysis(
         analysis_id=uuid.uuid4().hex[:16],
-        parsed=parsed,
+        source=source,
         dem=dem,
-        interpolation=interp,
         conditioned=conditioned,
         flow=flow,
         siting_result=result,
@@ -309,10 +497,158 @@ def analyze_contour_map(
         stage_timings=timings,
         exclusions=exclusions,
         options=opts,
-        source_filename=filename,
-        source_bytes=len(data),
         warnings=warnings,
     )
+
+
+def _contour_source_info(
+    parsed: ParsedContours, dem: DemGrid, filename: str | None
+) -> dict[str, Any]:
+    return {
+        "kind": "uploaded_contour_map",
+        "dataset": "Uploaded contour map (KML/KMZ)",
+        "filename": filename,
+        "resolution_m": dem.cell_size_m,
+        "working_crs_epsg": dem.epsg,
+        "bounds_4326": list(parsed.bounds.as_tuple()),
+        "contour_interval_m": parsed.interval_m,
+        "relief_m": round(float(dem.relief_m), 2),
+    }
+
+
+def _area_source_info(
+    box: area_service.AnalysisArea, dem: DemGrid, was_cached: bool, cells_inside: int
+) -> dict[str, Any]:
+    prov = dem.provenance
+    rows, cols = dem.shape
+    buffer_m = prov.get("buffer_m")
+    return {
+        "kind": "copernicus_glo30",
+        "dataset": "Copernicus DEM GLO-30",
+        "provider": copernicus_aws.PROVENANCE.provider,
+        "licence": copernicus_aws.PROVENANCE.licence,
+        "resolution_m": dem.cell_size_m,
+        "working_crs_epsg": dem.epsg,
+        "bounds_4326": box.as_list(),
+        "area_km2": box.area_km2,
+        "analysed_bounds_4326": prov.get("buffered_bounds_4326"),
+        "buffer_m": buffer_m,
+        "grid_size": [cols, rows],
+        "cells_inside_area": cells_inside,
+        "tiles_used": prov.get("tiles_used", []),
+        "cached": was_cached,
+        "elevation_min_m": prov.get("elevation_min_m"),
+        "elevation_max_m": prov.get("elevation_max_m"),
+        "relief_m": prov.get("relief_m"),
+        "coverage_pct": prov.get("coverage_pct"),
+        "note": (
+            f"Terrain is the Copernicus global {dem.cell_size_m:g} m elevation model, "
+            "coarser than a surveyed contour map: a 141 m pond spans about five cells. "
+            "Sites are proposed only inside the drawn rectangle; the grid extends "
+            f"{buffer_m if buffer_m is not None else 'a buffer'} m beyond it so "
+            "catchments that begin outside are measured whole."
+        ),
+    }
+
+
+def _summary(recommended: dict[str, Any] | None) -> dict[str, Any]:
+    """The three results the brief asks for: pond location, catchment area and
+    the water volume that can be collected -- for the recommended site, at the
+    top of the response where a reader looks first."""
+    if recommended is None:
+        return {
+            "available": False,
+            "reason": "no candidate pond site met the constraints",
+            "pond_location": None,
+            "catchment_area_ha": None,
+            "expected_water_volume_m3": None,
+        }
+
+    loc = recommended.get("location") or {}
+    metrics = (recommended.get("catchment") or {}).get("metrics") or {}
+    water = recommended.get("expected_water") or _expected_water(recommended)
+    return {
+        "available": True,
+        "site_rank": recommended.get("rank"),
+        "suitability_score": recommended.get("suitability_score"),
+        "pond_location": {"lat": loc.get("lat"), "lon": loc.get("lon")},
+        "catchment_area_ha": metrics.get("area_ha"),
+        "catchment_area_km2": metrics.get("area_km2"),
+        "expected_water_volume_m3": water["volume_m3"],
+        "expected_water_volume_basis": water["basis"],
+        "expected_water_volume_limited_by": water["limited_by"],
+        "pond_capacity_m3": water["pond_capacity_m3"],
+        "annual_inflow_m3": water["annual_inflow_m3"],
+    }
+
+
+def _expected_water(site: dict[str, Any]) -> dict[str, Any]:
+    """The water one site's pond can collect in a normal year, with its basis.
+
+    The pond's live storage capped by the catchment's 75 % dependable inflow.
+    Either alone would overstate it: storage the catchment cannot fill in a
+    normal year is not collectable, and inflow beyond what the pond holds runs
+    over the spillway. Per site only -- catchments nest, so a total across sites
+    would count the same water twice.
+    """
+    pond = site.get("pond") or {}
+    design = pond.get("recommended") if pond.get("available") else None
+    runoff = site.get("runoff") or {}
+
+    live = None if design is None else design.get("live_storage_m3")
+    gross = None if design is None else design.get("gross_capacity_m3")
+    mean = dependable = None
+    if runoff.get("available"):
+        mean = (runoff.get("annual_mean") or {}).get("runoff_volume_m3")
+        dependable = (runoff.get("design_75_percent_dependable") or {}).get("runoff_volume_m3")
+
+    volume: float | None
+    if live is not None and dependable is not None:
+        volume = min(float(live), float(dependable))
+        limited_by: str | None = "storage" if float(live) <= float(dependable) else "inflow"
+        basis = (
+            "the pond's live storage, capped by the catchment's 75 % dependable annual "
+            "inflow: the water it can collect in three years of four"
+        )
+    elif live is not None:
+        volume, limited_by = float(live), "storage"
+        basis = (
+            "the pond's live storage; rainfall was unavailable, so the inflow that "
+            "fills it could not be checked"
+        )
+    else:
+        volume, limited_by = None, None
+        basis = str(pond.get("reason") or "no pond could be sized at this site")
+
+    return {
+        "volume_m3": None if volume is None else round(volume, 1),
+        "limited_by": limited_by,
+        "basis": basis,
+        "pond_capacity_m3": {"gross": gross, "live": live},
+        "annual_inflow_m3": {"mean": mean, "dependable_75_percent": dependable},
+    }
+
+
+def _display_interval_m(relief_m: float) -> float:
+    for step in DISPLAY_INTERVALS_M:
+        if relief_m / step <= MAX_DISPLAY_LEVELS:
+            return step
+    return DISPLAY_INTERVALS_M[-1]
+
+
+def _display_contours(dem: DemGrid) -> dict[str, Any] | None:
+    """Contours traced from the grid, for an area with no uploaded lines to echo."""
+    try:
+        generated = contour_generator.generate(
+            dem.elevation,
+            transform=dem.transform,
+            epsg=dem.epsg,
+            cell_size_m=dem.cell_size_m,
+            interval_m=_display_interval_m(max(float(dem.relief_m), 1.0)),
+        )
+    except contour_generator.ContourGenerationError:
+        return None
+    return contour_lines_to_geojson(generated.lines, generated.epsg)
 
 
 def _site_payload(
@@ -369,6 +705,9 @@ def _site_payload(
         enrichment=enrichment,
         catchment_area_m2=catchment.area_m2,
     )
+    # Per site, so the map can label every marker with what it would collect,
+    # not only the recommended one in `summary`.
+    payload["expected_water"] = _expected_water(payload)
     return payload
 
 
@@ -525,12 +864,12 @@ def _water_balance_payload(
         soil_group = runoff["curve_number"].get("hydrologic_soil_group")
 
     if not monthly_runoff or not et0:
+        missing = "reference evapotranspiration" if monthly_runoff else "monthly runoff"
         return {
             "available": False,
-            "reason": (
-                "needs monthly runoff and reference evapotranspiration; ET0 comes "
-                "with the rainfall layer, so this is unavailable at a degraded tier"
-            ),
+            # Not "a degraded tier": this happened on full-tier runs whenever the
+            # rainfall source that answered carried no ET0. Say what is missing.
+            "reason": (f"needs {missing}, which the rainfall data on this run did not provide"),
         }
 
     try:

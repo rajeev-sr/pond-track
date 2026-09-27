@@ -207,10 +207,18 @@
 <h2>Assumptions and limitations</h2>
 <div class="caveat">
 <ul>
+  {% if terrain_from_area %}
+  <li><strong>The terrain is a global elevation model</strong>, Copernicus
+      GLO-30 at {{ terrain_resolution_m or 30 }} m, not a survey of this
+      village. A hollow narrower than a few cells (about 100 m) cannot appear
+      in it, and as a surface model it includes tree canopy and roofs. Confirm
+      the site levels on the ground before any earthwork.</li>
+  {% else %}
   <li><strong>The terrain is interpolated from contour lines</strong>, not
       surveyed directly. Between two contours the surface is inferred, so a
       hollow smaller than the contour interval ({{ contour_interval }} m here)
       cannot appear in it at all.</li>
+  {% endif %}
   <li><strong>The pond footprint has no orientation.</strong> The design fixes
       plan dimensions and depth; nothing in the model chooses a bearing, so the
       rectangle on the map shows size and position only.</li>

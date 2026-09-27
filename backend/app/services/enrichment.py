@@ -52,6 +52,12 @@ ASSUMED_HSG = "C"
 #: a layer missing -- so degrading is strictly better than waiting.
 DEFAULT_BUDGET_S = 20.0
 
+#: The rainfall ensemble stops waiting this long before the phase does, so the
+#: source that answered is collected rather than dropped with the one that has
+#: not. Without it a slow refusal from one source cost both: rainfall missed the
+#: deadline on every lab run while its POWER series sat in the cache.
+RAIN_MARGIN_S = 1.5
+
 
 @dataclass
 class Enrichment:
@@ -282,7 +288,9 @@ def fetch_enrichment(
         # estimate, so a rate-limited Open-Meteo no longer drops the whole
         # analysis to `terrain_only` -- NASA POWER answers instead, and the
         # response says which was used.
-        return fetch_ensemble(lon, lat, years=rainfall_years)
+        return fetch_ensemble(
+            lon, lat, years=rainfall_years, budget_s=max(0.5, budget_s - RAIN_MARGIN_S)
+        )
 
     def _water() -> Any:
         """The OSM context for the window. Cheap: the window is disk-cached.

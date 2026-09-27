@@ -30,6 +30,14 @@ DEFAULT_TTL_S = 24 * 3600
 
 KEY_PREFIX = "contour:job:"
 
+#: Finished jobs a memory store keeps, newest first. Each holds its whole
+#: result -- up to a few megabytes as Python objects -- and on a 512 MB lab
+#: system a day of results kept for the full TTL is the memory the next
+#: analysis needs. Jobs still queued or running are never evicted.
+MAX_MEMORY_RECORDS = 50
+
+_FINISHED = frozenset({"done", "partial", "failed", "cancelled"})
+
 
 @dataclass
 class JobRecord:
@@ -73,14 +81,26 @@ class MemoryJobStore:
     """Process-local store. Thread-safe, because the worker and the request
     handler that reads it are different threads under uvicorn."""
 
-    def __init__(self, ttl_s: float = DEFAULT_TTL_S) -> None:
+    def __init__(self, ttl_s: float = DEFAULT_TTL_S, max_records: int = MAX_MEMORY_RECORDS) -> None:
         self._records: dict[str, tuple[float, JobRecord]] = {}
         self._lock = threading.Lock()
         self._ttl = ttl_s
+        self._max = max_records
 
     def put(self, record: JobRecord) -> None:
         with self._lock:
+            # Re-inserted rather than updated in place, so dict order is the
+            # order of last write and the oldest finished job is found first.
+            self._records.pop(record.job_id, None)
             self._records[record.job_id] = (time.time() + self._ttl, record)
+            excess = len(self._records) - self._max
+            if excess > 0:
+                for job_id, (_, old) in list(self._records.items()):
+                    if excess <= 0:
+                        break
+                    if job_id != record.job_id and old.progress.get("state") in _FINISHED:
+                        del self._records[job_id]
+                        excess -= 1
 
     def get(self, job_id: str) -> JobRecord | None:
         with self._lock:

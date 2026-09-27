@@ -220,10 +220,57 @@ class CandidateSiteOut(BaseModel):
             "constraint bound the answer** (`binding_constraint`)."
         ),
     )
+    expected_water: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "The water this site's pond can collect in a normal year: `volume_m3` is "
+            "the smaller of its live storage and the catchment's 75 % dependable "
+            "inflow, with `limited_by`, the `basis` in words, and both inputs. Per "
+            "site only -- catchments nest, so never sum it across sites."
+        ),
+    )
+
+
+class AnalyzeAreaRequest(BaseModel):
+    """A rectangle drawn on the map, to be analysed with Copernicus terrain.
+
+    Only `bbox` is required; everything else has the same default as
+    `/analyzeContour`.
+    """
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {"bbox": [81.2814, 21.2398, 81.3126, 21.2636], "max_sites": 5}
+        }
+    }
+
+    bbox: list[float] = Field(
+        min_length=4,
+        max_length=4,
+        description=(
+            "The rectangle as `[min_lon, min_lat, max_lon, max_lat]` in WGS84 degrees. "
+            "Between 0.1 km² and the configured cap (100 km² by default)."
+        ),
+    )
+    max_sites: int = Field(5, ge=1, le=25, description="Maximum ranked sites to return.")
+    max_slope_pct: float = Field(8.0, gt=0, le=100, description="Reject cells steeper than this.")
+    enrich: bool = Field(
+        True,
+        description=(
+            "Fetch soil, land cover and rainfall for the area. False gives a "
+            "terrain-only answer."
+        ),
+    )
+    include_contours: bool = Field(
+        False, description="Return contours traced from the terrain, as GeoJSON."
+    )
+    include_catchment_geometry: bool = Field(
+        True, description="Include each catchment's GeoJSON polygon."
+    )
 
 
 class ContourAnalysisResponse(BaseModel):
-    """The full result of `POST /analyzeContour`."""
+    """The full result of `POST /analyzeContour` and `POST /analyzeArea`."""
 
     # A real captured response, so `/docs` shows what the API actually returns
     # rather than a schema skeleton (MC-23).
@@ -241,17 +288,42 @@ class ContourAnalysisResponse(BaseModel):
             "restart."
         )
     )
-    input: dict[str, Any] = Field(description="Filename, size, and the options applied.")
-    contour_map: dict[str, Any] = Field(
+    input: dict[str, Any] = Field(
+        description=(
+            "What was sent: filename and size for a contour map, or the rectangle and "
+            "its area for a drawn area; plus the options applied."
+        )
+    )
+    summary: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "The three results the brief asks for, for the recommended site: "
+            "`pond_location` (lat, lon), `catchment_area_ha`, and "
+            "`expected_water_volume_m3` -- the pond's live storage capped by the "
+            "catchment's 75 % dependable inflow -- with the basis of that figure."
+        ),
+    )
+    terrain_source: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Where the terrain came from: the uploaded contour map, or Copernicus "
+            "GLO-30 for a drawn area -- with its resolution, extent and working CRS."
+        ),
+    )
+    contour_map: dict[str, Any] | None = Field(
+        default=None,
         description=(
             "What was read from the file: elevation strategy used, line and vertex "
-            "counts, derived contour interval, extent, and working CRS."
-        )
+            "counts, derived contour interval, extent, and working CRS. Null for a "
+            "drawn area, which has no uploaded contours."
+        ),
     )
     interpolated_terrain: dict[str, Any] = Field(
         description="Grid resolution and how it was derived, plus conditioning results."
     )
-    area_of_interest: dict[str, Any] = Field(description="GeoJSON bbox of the contours.")
+    area_of_interest: dict[str, Any] = Field(
+        description="GeoJSON rectangle: the contour sheet's extent, or the area drawn."
+    )
     suitability: dict[str, Any] = Field(
         description="Analysis tier, layers used and unavailable, weights, constraints."
     )
@@ -267,7 +339,11 @@ class ContourAnalysisResponse(BaseModel):
     recommended_site: CandidateSiteOut | None
     candidate_sites: list[CandidateSiteOut]
     contours: dict[str, Any] | None = Field(
-        default=None, description="Parsed contours as GeoJSON, when requested."
+        default=None,
+        description=(
+            "Contours as GeoJSON, when requested: the parsed lines for a contour map, "
+            "or lines traced from the terrain for a drawn area."
+        ),
     )
     warnings: list[str]
     explanation: dict[str, Any] | None = Field(

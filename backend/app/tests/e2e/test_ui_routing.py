@@ -17,12 +17,10 @@ minutes.
 
 from __future__ import annotations
 
-import urllib.error
-import urllib.request
-
 import pytest
 
 from app.tests.e2e.cdp import Chrome
+from app.tests.e2e.urls import urlopen
 
 MOUNT_TIMEOUT_S = 60.0
 ANALYSIS_TIMEOUT_S = 300.0
@@ -61,7 +59,7 @@ class TestEveryPageIsDeepLinkable:
     @pytest.mark.parametrize("path,name,marker", PAGES)
     def test_the_server_returns_the_app_not_a_404(self, frontend_url, path, name, marker) -> None:
         """The other half of a deep link: the SPA fallback."""
-        with urllib.request.urlopen(f"{frontend_url}{path}", timeout=20) as response:
+        with urlopen(f"{frontend_url}{path}") as response:
             assert response.status == 200, f"{path} answered HTTP {response.status}"
             body = response.read().decode("utf-8", "replace")
         assert '<div id="root">' in body, f"{path} did not serve the app shell"
@@ -75,7 +73,7 @@ class TestTheApiPagesAreNotCapturedBySpa:
         [("/docs", "text/html"), ("/redoc", "text/html"), ("/openapi.json", "application/json")],
     )
     def test_it_is_served_by_the_api(self, frontend_url, path, content_type) -> None:
-        with urllib.request.urlopen(f"{frontend_url}{path}", timeout=20) as response:
+        with urlopen(f"{frontend_url}{path}") as response:
             assert response.status == 200
             assert response.headers.get("content-type", "").startswith(content_type)
             body = response.read().decode("utf-8", "replace")
@@ -87,7 +85,7 @@ class TestTheApiPagesAreNotCapturedBySpa:
         """Exactly what Swagger UI complains about when this breaks."""
         import json
 
-        with urllib.request.urlopen(f"{frontend_url}/openapi.json", timeout=20) as response:
+        with urlopen(f"{frontend_url}/openapi.json") as response:
             spec = json.load(response)
         assert str(spec.get("openapi", "")).startswith("3."), "no valid version field"
         assert spec["paths"], "the spec carries no paths"

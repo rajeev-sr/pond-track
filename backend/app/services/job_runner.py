@@ -17,13 +17,22 @@ from __future__ import annotations
 
 import time
 import uuid
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from app.core.logging import get_logger
-from app.services import dem_cache
-from app.services.contour_analysis import ContourAnalysisOptions, analyze_contour_map
+from app.core.memory import release_memory
+from app.services import area as area_service
+from app.services import capacity, dem_cache
+from app.services.contour_analysis import (
+    ContourAnalysis,
+    ContourAnalysisOptions,
+    StageReporter,
+    analyze_area,
+    analyze_contour_map,
+)
 from app.services.job_store import JobRecord, JobStore, get_store
-from app.services.jobs import JobProgress
+from app.services.jobs import AREA_STEPS, STEPS, JobProgress, Step
 
 log = get_logger("services.job_runner")
 
@@ -93,44 +102,124 @@ def run_analysis_job(
     *,
     store: JobStore | None = None,
 ) -> JobRecord:
-    """Execute one analysis job to a terminal state and return its record.
+    """Execute one contour-map analysis job to a terminal state and return its record.
 
     Never raises for an analysis failure: a failed job is a `failed` record with
     an RFC 7807-shaped `error`, which is what the status endpoint serves. A raise
     here would lose the job instead of reporting it.
     """
+    return _run_job(
+        job_id,
+        options,
+        store=store,
+        steps=STEPS,
+        params=dict(options or {}),
+        analyse=lambda opts, reporter: analyze_contour_map(data, filename, opts, reporter=reporter),
+    )
+
+
+def run_area_job(
+    job_id: str,
+    bbox: Sequence[float],
+    options: dict[str, Any] | None = None,
+    *,
+    store: JobStore | None = None,
+    fetch: Any = None,
+) -> JobRecord:
+    """The same, for a rectangle drawn on the map.
+
+    Its progress bar has `terrain` where a contour job has `parse` and
+    `interpolate`; everything after that is the same pipeline and the same
+    settling rules. `fetch` replaces the Copernicus read, for tests.
+    """
+    return _run_job(
+        job_id,
+        options,
+        store=store,
+        steps=AREA_STEPS,
+        params={**(options or {}), "bbox": list(bbox)},
+        analyse=lambda opts, reporter: analyze_area(bbox, opts, reporter=reporter, fetch=fetch),
+    )
+
+
+def _describe_failure(exc: Exception) -> dict[str, str]:
+    """The problem a failed job reports. A terrain failure on a drawn area gets
+    the same words the synchronous route uses -- "draw over land", "try again" --
+    rather than an exception name the person cannot act on."""
+    failure = area_service.terrain_failure(exc)
+    if failure is None:
+        return {
+            "type": "/errors/analysis-failed",
+            "title": "Analysis failed",
+            "detail": f"{type(exc).__name__}: {exc}",
+        }
+    kind, detail = failure
+    if kind == "no_terrain":
+        return {"type": "/errors/unanswerable", "title": "No terrain here", "detail": detail}
+    return {
+        "type": "/errors/provider-unavailable",
+        "title": "Terrain unavailable",
+        "detail": detail,
+    }
+
+
+def _run_job(
+    job_id: str,
+    options: dict[str, Any] | None,
+    *,
+    store: JobStore | None,
+    steps: tuple[Step, ...],
+    params: dict[str, Any],
+    analyse: Callable[[ContourAnalysisOptions, StageReporter], ContourAnalysis],
+) -> JobRecord:
+    """The body both kinds of job share: run, report, settle, register."""
     target = store if store is not None else get_store()
-    progress = JobProgress()
+    progress = JobProgress(steps=steps)
     now = time.time()
     record = JobRecord(
         job_id=job_id,
         progress=progress.as_dict(),
-        params=dict(options or {}),
+        params=params,
         created_at=now,
         updated_at=now,
         started_at=now,
     )
     target.put(record)
 
+    # Wait for an analysis slot while the status still says `queued`: on a
+    # 512 MB system two analyses at once is an OOM kill, and a job that waits
+    # its turn is the honest version of that.
+    slots = capacity.get_slots()
+    slots.acquire()
+    try:
+        return _execute(job_id, record, progress, target, options, analyse)
+    finally:
+        slots.release()
+        release_memory()
+
+
+def _execute(
+    job_id: str,
+    record: JobRecord,
+    progress: JobProgress,
+    target: JobStore,
+    options: dict[str, Any] | None,
+    analyse: Callable[[ContourAnalysisOptions, StageReporter], ContourAnalysis],
+) -> JobRecord:
     reporter = _Reporter(record, progress, target)
     progress.start()
     reporter.flush()
 
     try:
         opts = ContourAnalysisOptions(**(options or {}))
-        analysis = analyze_contour_map(data, filename, opts, reporter=reporter)
+        analysis = analyse(opts, reporter)
     except Exception as exc:
         # A trace id travels with the failure, as it does on every synchronous
         # error. Without one the reason reaches the screen but nothing connects
         # it to the log line that has the traceback -- which is the whole point
         # of quoting an id to a user.
         trace_id = uuid.uuid4().hex[:12]
-        progress.error = {
-            "type": "/errors/analysis-failed",
-            "title": "Analysis failed",
-            "detail": f"{type(exc).__name__}: {exc}",
-            "trace_id": trace_id,
-        }
+        progress.error = {**_describe_failure(exc), "trace_id": trace_id}
         # A step already recorded its own failure via the reporter; if the throw
         # came from outside a stage (bad options, say) nothing has, so the job
         # would be unsettleable. Fail the first outstanding step to keep the
@@ -151,7 +240,12 @@ def run_analysis_job(
         # comes back with no `dem_id`, and every follow-up call -- streams,
         # terrain tiles, click-to-delineate, available land -- has nothing to
         # address. That is not a small omission: it is most of the UI.
-        body["dem_id"] = dem_cache.remember(analysis.parsed, analysis.dem, analysis.interpolation)
+        body["dem_id"] = dem_cache.remember_analysis(analysis)
+        # The result's own address. Export and the PDF report are keyed by job,
+        # not by `analysis_id`, and a client holding only the result -- the UI's
+        # export link -- had no way to know it: the link it built from
+        # `analysis_id` answered 404 on every run.
+        body["job_id"] = job_id
         record.result = body
     except Exception as exc:
         # The analysis itself succeeded; settling it did not. Report that rather

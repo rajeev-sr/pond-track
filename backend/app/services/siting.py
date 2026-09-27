@@ -444,7 +444,8 @@ def _depression_regions(
     *,
     min_depth_m: float,
     min_cells: int,
-) -> list[_Region]:
+    buildable: npt.NDArray[np.bool_] | None = None,
+) -> tuple[list[_Region], int]:
     """Natural depressions, aggregated as whole landforms.
 
     Criteria are aggregated **over the region**, not sampled at one cell, because
@@ -454,23 +455,36 @@ def _depression_regions(
     off a single cell under-reports the water a bowl collects -- after flooding,
     the epsilon gradient carries flow to the spill point rather than through the
     geometric centre, so the deepest cell can show almost no upstream area.
+
+    Returns the regions and how many depressions were dropped for holding no
+    ground a pond may be built on.
     """
     depth = np.where(np.isfinite(conditioned.fill_depth), conditioned.fill_depth, 0.0)
     mask = conditioned.valid & (depth > min_depth_m)
     if not mask.any():
-        return []
+        return [], 0
 
     labels = sk_label(mask, connectivity=2)
     regions: list[_Region] = []
+    unbuildable = 0
     for lab in range(1, int(labels.max()) + 1):
         sel = labels == lab
         n = int(sel.sum())
         if n < min_cells:
             continue
         rows, cols = np.nonzero(sel)
-        # The pond goes at the deepest cell that is actually buildable.
-        buildable = feasible[rows, cols]
-        pick_from = buildable if buildable.any() else np.ones(n, dtype=bool)
+        # The pond goes at the deepest feasible cell. A bowl's deepest cells
+        # often fail feasibility on upstream area alone -- the epsilon gradient
+        # carries its flow to the spill point -- so failing that, the deepest
+        # cell that can be built on at all. Never a cell the hard masks rule
+        # out: this used to fall back to *any* cell of the depression, which
+        # put sites on existing tanks, under buildings and outside a drawn area.
+        pick_from = feasible[rows, cols]
+        if not pick_from.any():
+            pick_from = (feasible if buildable is None else buildable)[rows, cols]
+        if not pick_from.any():
+            unbuildable += 1
+            continue
         d_sub = depth[rows, cols]
         deepest = int(np.argmax(np.where(pick_from, d_sub, -np.inf)))
         acc_sub = flow.accumulation[rows, cols]
@@ -498,7 +512,7 @@ def _depression_regions(
                 ),
             )
         )
-    return regions
+    return regions, unbuildable
 
 
 def _channel_regions(
@@ -629,15 +643,20 @@ def extract_sites(
     weights_override: Mapping[str, float] | None = None,
     min_depression_depth_m: float = DEFAULT_MIN_DEPRESSION_DEPTH_M,
     slope_pct: npt.NDArray[np.float32] | None = None,
+    buildable: npt.NDArray[np.bool_] | None = None,
 ) -> tuple[list[CandidateSite], list[str]]:
-    """Build candidate regions, score them against each other, and rank."""
+    """Build candidate regions, score them against each other, and rank.
+
+    `buildable` is the hard veto -- slope, land cover, exclusions, and a drawn
+    area's edge. Without it, only feasible cells can hold a depression's site.
+    """
     warnings: list[str] = []
     if slope_pct is None:
         slope_pct = slope_percent(dem.elevation, dem.cell_size_m)
     concav = np.nan_to_num(plan_concavity(dem), nan=0.0)
     min_cells = max(4, int(round(MIN_REGION_AREA_M2 / dem.cell_size_m**2)))
 
-    regions = _depression_regions(
+    regions, unbuildable = _depression_regions(
         conditioned,
         flow,
         slope_pct,
@@ -646,7 +665,14 @@ def extract_sites(
         availability,
         min_depth_m=min_depression_depth_m,
         min_cells=min_cells,
+        buildable=buildable,
     )
+    if unbuildable:
+        warnings.append(
+            f"{unbuildable} natural depression(s) not proposed: none of their ground may be "
+            "built on (existing water, buildings or roads, too steep, or outside the "
+            "selected area)"
+        )
     n_depressions = len(regions)
     regions += _channel_regions(
         conditioned,
@@ -772,6 +798,7 @@ def identify_pond_sites(
         min_separation_m=min_separation_m,
         min_depression_depth_m=min_depression_depth_m,
         slope_pct=slope_pct,
+        buildable=buildable,
     )
     weights = resolve_weights(
         criteria_for(has_land_cover=availability is not None), weights_override

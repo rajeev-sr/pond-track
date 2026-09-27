@@ -14,6 +14,7 @@ forwarded to people who never saw the tool.
 from __future__ import annotations
 
 import base64
+import os
 from pathlib import Path
 from typing import Any
 
@@ -165,14 +166,29 @@ def build_context(result: dict[str, Any], *, warnings: list[str] | None = None) 
             }
         )
 
+    terrain = result.get("terrain_source") or {}
+    from_area = terrain.get("kind") == "copernicus_glo30"
     source_rows = [
-        {
-            "layer": "Terrain",
-            "provider": (
-                "Uploaded contour map " f"({(result.get('input') or {}).get('filename', 'KML')})"
-            ),
-            "licence": "supplied by the user",
-        }
+        (
+            {
+                "layer": "Terrain",
+                "provider": (
+                    f"{terrain.get('provider') or 'Copernicus DEM'} — "
+                    f"{terrain.get('dataset') or 'GLO-30'}, "
+                    f"{terrain.get('resolution_m') or 30:g} m"
+                ),
+                "licence": terrain.get("licence") or "—",
+            }
+            if from_area
+            else {
+                "layer": "Terrain",
+                "provider": (
+                    "Uploaded contour map "
+                    f"({(result.get('input') or {}).get('filename', 'KML')})"
+                ),
+                "licence": "supplied by the user",
+            }
+        )
     ]
     for name, key in (("Soil", "soil"), ("Land cover", "land_cover"), ("Rainfall", "rainfall")):
         block = environment.get(key) or {}
@@ -189,7 +205,9 @@ def build_context(result: dict[str, Any], *, warnings: list[str] | None = None) 
     return {
         "analysis_id": result.get("analysis_id"),
         "generated_on": (result.get("generated_at") or "")[:10],
-        "site_label": (result.get("input") or {}).get("filename") or "uploaded contour map",
+        "site_label": _site_label(result, from_area),
+        "terrain_from_area": from_area,
+        "terrain_resolution_m": terrain.get("resolution_m"),
         "tier": tier,
         "tier_label": tier.replace("_", " ").title(),
         "tier_meaning": TIER_MEANING.get(tier, ""),
@@ -269,9 +287,59 @@ def build_context(result: dict[str, Any], *, warnings: list[str] | None = None) 
     }
 
 
+def _site_label(result: dict[str, Any], from_area: bool) -> str:
+    """What the report is about: the uploaded file, or the rectangle drawn."""
+    given = result.get("input") or {}
+    if not from_area:
+        return str(given.get("filename") or "uploaded contour map")
+    bbox = given.get("bbox") or []
+    if len(bbox) != 4:
+        return "selected area"
+    min_lon, min_lat, max_lon, max_lat = (float(v) for v in bbox)
+    area = given.get("area_km2")
+    size = f", {float(area):.2f} km²" if area is not None else ""
+    return (
+        f"selected area {min_lat:.4f} to {max_lat:.4f}°N, "
+        f"{min_lon:.4f} to {max_lon:.4f}°E{size}"
+    )
+
+
 def render_html(result: dict[str, Any], *, warnings: list[str] | None = None) -> str:
     context = build_context(result, warnings=warnings)
     return _environment().get_template(TEMPLATE_NAME).render(**context)
+
+
+#: What WeasyPrint looks up by soname, in load order: each after what it needs.
+TEXT_LIBRARIES = (
+    "libglib-2.0.so.0",
+    "libgobject-2.0.so.0",
+    "libfontconfig.so.1",
+    "libharfbuzz.so.0",
+    "libharfbuzz-subset.so.0",
+    "libpango-1.0.so.0",
+    "libpangoft2-1.0.so.0",
+)
+
+
+def _preload_text_libraries() -> None:
+    """Load pango and its companions from `WEASYPRINT_LIB_DIR`, when set.
+
+    The lab systems have no system pango, only a conda environment that carries
+    one. Putting that environment on `LD_LIBRARY_PATH` would place its libraries
+    ahead of every extension module in the process -- numpy's, rasterio's --
+    for the sake of one PDF route. Loaded by full path instead, they are found
+    already loaded when WeasyPrint asks for them by soname, and nothing else in
+    the process is affected. A no-op when the variable is unset.
+    """
+    lib_dir = os.environ.get("WEASYPRINT_LIB_DIR")
+    if not lib_dir:
+        return
+    import ctypes
+
+    for soname in TEXT_LIBRARIES:
+        path = Path(lib_dir) / soname
+        if path.exists():
+            ctypes.CDLL(str(path), mode=ctypes.RTLD_GLOBAL)
 
 
 def render_pdf(result: dict[str, Any], *, warnings: list[str] | None = None) -> bytes:
@@ -282,6 +350,7 @@ def render_pdf(result: dict[str, Any], *, warnings: list[str] | None = None) -> 
     and Cairo libraries to be present. A deployment missing them then fails when
     a report is asked for, with a clear error, instead of refusing to boot.
     """
+    _preload_text_libraries()
     from weasyprint import HTML
 
     html = render_html(result, warnings=warnings)

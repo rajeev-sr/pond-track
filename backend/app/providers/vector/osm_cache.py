@@ -20,11 +20,13 @@ chase currency.
 from __future__ import annotations
 
 import json
+import threading
 import time
 from pathlib import Path
 from typing import Any
 
 from app.core.logging import get_logger
+from app.providers.base import ProviderUnavailableError
 from app.providers.vector.overpass import OsmContext, OsmFeature
 
 log = get_logger("providers.osm_cache")
@@ -53,6 +55,27 @@ READABLE_VERSIONS = frozenset({1, 2})
 #: at an empty path -- the warm window was not upgraded, it was unreachable. Bump
 #: this only for a change that makes old entries genuinely unusable.
 CACHE_KEY_VERSION = 1
+
+#: How long a window that every mirror refused is remembered as refused. Short,
+#: because the public servers recover within minutes -- but without it every run
+#: over that window spent its whole 20 s enrichment budget asking again, warm or
+#: not, and piled another request onto servers that were already refusing.
+FAILURE_TTL_S = 10 * 60
+
+
+class _Flight:
+    """One window's request in progress, and what it came back with."""
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.context: OsmContext | None = None
+        self.error: ProviderUnavailableError | None = None
+
+
+#: Windows being fetched right now, so a second run over the same window waits
+#: on the first request instead of sending its own.
+_inflight: dict[str, _Flight] = {}
+_inflight_lock = threading.Lock()
 
 
 def cell_for(bounds: tuple[float, float, float, float]) -> tuple[float, ...]:
@@ -182,15 +205,78 @@ def fetch_cached(
 ) -> tuple[OsmContext, bool]:
     """`(context, was_cached)`, fetching only on a miss.
 
+    One request per window at a time: a run that finds the window already being
+    fetched waits for that answer (its own enrichment budget bounds the wait).
+    A window every mirror just refused raises at once for `FAILURE_TTL_S`.
+
     `fetch` is injectable so the tests never touch Overpass.
     """
     hit = read(store, bounds, ttl_s=ttl_s)
     if hit is not None:
         return hit, True
+    _raise_if_recently_refused(store, bounds)
+
+    key = cache_key(bounds)
+    with _inflight_lock:
+        flight = _inflight.get(key)
+        leader = flight is None
+        if flight is None:
+            flight = _Flight()
+            _inflight[key] = flight
+    if not leader:
+        # Handed over in memory, not re-read from disk: the answer must reach
+        # the waiters even when the store will not take the file.
+        flight.done.wait()
+        if flight.context is not None:
+            return flight.context, True
+        raise flight.error or ProviderUnavailableError("overpass", "the shared request failed")
 
     if fetch is None:
         from app.providers.vector.overpass import fetch_osm_context as fetch
 
-    context = fetch(bounds)
+    try:
+        context: OsmContext = fetch(bounds)
+        flight.context = context
+    except ProviderUnavailableError as exc:
+        flight.error = exc
+        _remember_refusal(store, bounds, exc.detail)
+        raise
+    except Exception as exc:
+        flight.error = ProviderUnavailableError("overpass", type(exc).__name__)
+        raise
+    finally:
+        with _inflight_lock:
+            _inflight.pop(key, None)
+        flight.done.set()
     write(store, bounds, context)
+    _refusal_path(store, bounds).unlink(missing_ok=True)
     return context, False
+
+
+def _refusal_path(store: Path, bounds: tuple[float, float, float, float]) -> Path:
+    target = path_for(store, bounds)
+    return target.with_name(f"{target.stem}.refused.json")
+
+
+def _remember_refusal(store: Path, bounds: tuple[float, float, float, float], reason: str) -> None:
+    target = _refusal_path(store, bounds)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps({"refused_at": time.time(), "reason": reason[:500]}))
+    except OSError as exc:
+        log.warning("osm refusal not recorded", path=str(target), error=str(exc))
+
+
+def _raise_if_recently_refused(store: Path, bounds: tuple[float, float, float, float]) -> None:
+    try:
+        payload = json.loads(_refusal_path(store, bounds).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    age = time.time() - float(payload.get("refused_at", 0.0))
+    if age > FAILURE_TTL_S:
+        return
+    raise ProviderUnavailableError(
+        "overpass",
+        f"every mirror refused this area {int(age // 60)} min ago; it is asked again "
+        f"after {FAILURE_TTL_S // 60} min rather than on every run",
+    )

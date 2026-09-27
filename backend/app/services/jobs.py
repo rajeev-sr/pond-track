@@ -108,6 +108,27 @@ STEPS: tuple[Step, ...] = (
     Step("catchments", "Delineating catchments and sizing ponds", 0.0566),
 )
 
+#: The drawn-area pipeline. `terrain` replaces parse + interpolate: the grid comes
+#: from Copernicus already regular, so there is nothing to read or interpolate.
+#:
+#: Weights are estimates until measured (plan Phase 4): the grid is a fraction of
+#: the contour sheet's, so everything but enrichment shrinks, and enrichment -- the
+#: same cold provider calls as a contour run -- dominates even more.
+AREA_STEPS: tuple[Step, ...] = (
+    Step("terrain", "Fetching terrain for the selected area", 0.0900),
+    Step("condition", "Conditioning the surface", 0.0150),
+    Step("flow_routing", "Routing flow", 0.0060),
+    Step(
+        "enrichment",
+        "Fetching soil, land cover and rainfall",
+        0.8500,
+        optional=True,
+        degrades_to="terrain-only scoring, with an assumed soil group",
+    ),
+    Step("siting", "Scoring candidate sites", 0.0040),
+    Step("catchments", "Delineating catchments and sizing ponds", 0.0350),
+)
+
 STEPS_BY_NAME: dict[str, Step] = {s.name: s for s in STEPS}
 
 #: The steps a usable answer cannot be produced without.
@@ -141,14 +162,24 @@ class JobProgress:
     """Mutable progress for one job, and the source of its reported state."""
 
     state: JobState = "queued"
-    #: step name -> outcome
-    outcomes: dict[str, StepOutcome] = field(
-        default_factory=lambda: {s.name: "pending" for s in STEPS}
-    )
+    #: step name -> outcome; filled from `steps` when not given.
+    outcomes: dict[str, StepOutcome] = field(default_factory=dict)
     current_step: str | None = None
     attempt: int = 1
     warnings: list[str] = field(default_factory=list)
     error: dict[str, Any] | None = None
+    #: Which pipeline this job runs. Per job rather than global because there
+    #: are two: a drawn area has no `parse` or `interpolate`, and a single fixed
+    #: list would reject its `terrain` step outright.
+    steps: tuple[Step, ...] = STEPS
+
+    def __post_init__(self) -> None:
+        if not self.outcomes:
+            self.outcomes = {s.name: "pending" for s in self.steps}
+
+    @property
+    def _by_name(self) -> dict[str, Step]:
+        return {s.name: s for s in self.steps}
 
     # ── transitions ──────────────────────────────────────────────────────────
 
@@ -182,14 +213,14 @@ class JobProgress:
         """
         self._check(name)
         self.outcomes[name] = "skipped"
-        self.warnings.append(f"{STEPS_BY_NAME[name].label.lower()} skipped ({reason})")
+        self.warnings.append(f"{self._by_name[name].label.lower()} skipped ({reason})")
         if self.current_step == name:
             self.current_step = None
 
     def fail_step(self, name: str, reason: str) -> None:
         """Record a step failure. Whether the job survives depends on the table."""
         self._check(name)
-        step = STEPS_BY_NAME[name]
+        step = self._by_name[name]
         self.outcomes[name] = "failed"
         if step.optional:
             lost = step.degrades_to or "reduced detail"
@@ -207,8 +238,8 @@ class JobProgress:
         self.to("cancelled")
 
     def _check(self, name: str) -> None:
-        if name not in STEPS_BY_NAME:
-            raise KeyError(f"unknown step {name!r}; expected one of {sorted(STEPS_BY_NAME)}")
+        if name not in self._by_name:
+            raise KeyError(f"unknown step {name!r}; expected one of {sorted(self._by_name)}")
 
     # ── derived values ───────────────────────────────────────────────────────
 
@@ -223,8 +254,9 @@ class JobProgress:
         """
         if self.state in ("done", "partial"):
             return 100
+        by_name = self._by_name
         earned = sum(
-            STEPS_BY_NAME[name].weight
+            by_name[name].weight
             for name, outcome in self.outcomes.items()
             if outcome in ("done", "failed", "skipped")
         )
@@ -232,11 +264,13 @@ class JobProgress:
 
     @property
     def failed_required(self) -> tuple[str, ...]:
-        return tuple(n for n in REQUIRED_STEPS if self.outcomes.get(n) == "failed")
+        required = [s.name for s in self.steps if not s.optional]
+        return tuple(n for n in required if self.outcomes.get(n) == "failed")
 
     @property
     def failed_optional(self) -> tuple[str, ...]:
-        return tuple(n for n in OPTIONAL_STEPS if self.outcomes.get(n) == "failed")
+        optional = [s.name for s in self.steps if s.optional]
+        return tuple(n for n in optional if self.outcomes.get(n) == "failed")
 
     def settle(self) -> JobState:
         """Move to the terminal state the step outcomes imply (M6-4).
@@ -267,7 +301,7 @@ class JobProgress:
             "progress_pct": self.progress_pct,
             "current_step": self.current_step,
             "current_step_label": (
-                None if self.current_step is None else STEPS_BY_NAME[self.current_step].label
+                None if self.current_step is None else self._by_name[self.current_step].label
             ),
             "attempt": self.attempt,
             "is_terminal": self.state in TERMINAL_STATES,
@@ -279,7 +313,7 @@ class JobProgress:
                     "optional": s.optional,
                     "outcome": self.outcomes.get(s.name, "pending"),
                 }
-                for s in STEPS
+                for s in self.steps
             ],
             "warnings": list(self.warnings),
             "error": self.error,

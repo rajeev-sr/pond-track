@@ -29,8 +29,12 @@ CHROME_NAMES = ("google-chrome", "google-chrome-stable", "chromium", "chromium-b
 
 
 def _reachable(url: str, timeout: float = 3.0) -> bool:
+    # Retried: a single dead connection on a flaky network used to skip the
+    # whole suite as "not serving".
+    from app.tests.e2e.urls import urlopen
+
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as response:
+        with urlopen(url, timeout=timeout, tries=8) as response:
             return bool(200 <= response.status < 400)
     except (urllib.error.URLError, OSError):
         return False

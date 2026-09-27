@@ -62,9 +62,19 @@ def _isolated_cache_store(tmp_path: Path, request: pytest.FixtureRequest) -> Ite
     original_read = rainfall_cache.read
     if not wants_database:
         rainfall_cache.read = lambda *_a, **_k: None  # type: ignore[assignment]
+
+    # Open-Meteo remembers a refusal for an hour, per process: one test's
+    # stubbed 429 must not become the next test's "recently refused".
+    from app.providers.rainfall import open_meteo
+
+    open_meteo._refusal = None
     try:
         yield
     finally:
+        if open_meteo._reprobe is not None:
+            open_meteo._reprobe.join(5.0)
+        open_meteo._reprobe = None
+        open_meteo._refusal = None
         rainfall_cache.read = original_read  # type: ignore[assignment]
         if previous is None:
             os.environ.pop("COG_STORE_PATH", None)
