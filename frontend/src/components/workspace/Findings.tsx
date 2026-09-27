@@ -40,8 +40,9 @@ export function Findings() {
         <div className="f-body">
           <span className="stamp">No run yet</span>
           <p style={{ color: "var(--ink-2)", fontSize: 13.5 }}>
-            Choose a contour survey in the job sheet and press Run. The proposal, the candidates it
-            was chosen from, the hydrology behind it and every caveat appear here.
+            Upload a contour survey or draw an area on the map in the job sheet, and press Run. The
+            proposal — where the pond goes, the catchment that feeds it and the water it collects —
+            the candidates it was chosen from, the hydrology behind it and every caveat appear here.
           </p>
         </div>
       </aside>
@@ -56,6 +57,7 @@ export function Findings() {
   const balance = pond?.water_balance?.available ? pond.water_balance : null;
   const runoff = site?.runoff?.available ? site.runoff : null;
   const metrics = site?.catchment.metrics ?? null;
+  const water = site?.expected_water ?? null;
   const exclusions = analysis.suitability.exclusions ?? null;
   const env = analysis.environment;
   const total = analysis.candidate_sites.length;
@@ -96,10 +98,34 @@ export function Findings() {
                   <tbody>
                     <tr>
                       <td>
+                        Pond location
+                        <small>lat, lon</small>
+                      </td>
+                      <td className="n">
+                        {site.location.lat.toFixed(5)}, {site.location.lon.toFixed(5)}
+                      </td>
+                    </tr>
+                    <tr>
+                      <td>
                         Catchment
                         <small>{num(metrics.area_km2, 2)} km²</small>
                       </td>
                       <td className="n">{num(metrics.area_ha, 1)} ha</td>
+                    </tr>
+                    <tr className="key-result">
+                      <td>
+                        Water collected
+                        <small>
+                          {water?.volume_m3 == null
+                            ? water?.basis ?? "no pond was sized here"
+                            : water.limited_by === "inflow"
+                              ? "a year · limited by the dry-year inflow"
+                              : "a year · limited by the pond's live storage"}
+                        </small>
+                      </td>
+                      <td className="n">
+                        {water?.volume_m3 != null ? volume(water.volume_m3) : "—"}
+                      </td>
                     </tr>
                     {design && (
                       <>
@@ -190,8 +216,8 @@ export function Findings() {
                   <th>#</th>
                   <th>Form</th>
                   <th className="n">Score</th>
-                  <th className="n">Catchment</th>
-                  <th className="n">Storage</th>
+                  <th className="n">Catchment ha</th>
+                  <th className="n">Collects m³</th>
                 </tr>
               </thead>
               <tbody>
@@ -206,8 +232,8 @@ export function Findings() {
                     <td className="n">{num(s.suitability_score, 1)}</td>
                     <td className="n">{num(s.catchment.metrics.area_ha, 1)}</td>
                     <td className="n">
-                      {s.pond?.recommended
-                        ? num(s.pond.recommended.gross_capacity_m3)
+                      {s.expected_water?.volume_m3 != null
+                        ? num(s.expected_water.volume_m3)
                         : "—"}
                     </td>
                   </tr>

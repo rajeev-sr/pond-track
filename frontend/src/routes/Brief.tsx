@@ -34,7 +34,7 @@ const STAGES = [
   {
     n: "Stage 01",
     h: "Surface",
-    p: "Contour polylines are triangulated into a metric elevation grid, in the UTM zone the sheet itself falls in.",
+    p: "Contour polylines are triangulated into a metric elevation grid in the sheet's own UTM zone — or, for an area drawn on the map, the Copernicus 30 m terrain model is read for it.",
   },
   {
     n: "Stage 02",
@@ -89,8 +89,8 @@ export function Brief() {
                 maxWidth: "40ch",
               }}
             >
-              A Gram Panchayat has a contour sheet and a budget. Contour answers the question that
-              sheet cannot:{" "}
+              A Gram Panchayat has a contour sheet — or only a place on the map — and a budget.
+              Contour answers the question neither can on its own:{" "}
               <b style={{ color: "var(--ink)", fontWeight: 500 }}>
                 which point on this land will hold water, how much catchment feeds it, how much it
                 will yield in a normal year, and how big the structure should be.
@@ -118,19 +118,19 @@ export function Brief() {
                 <span className="stamp" style={{ display: "block", marginBottom: 4 }}>
                   Input
                 </span>
-                Contour survey · KML / KMZ
+                Contour survey (KML / KMZ) or an area drawn on the map
               </div>
               <div style={{ fontSize: 13, color: "var(--ink-2)" }}>
                 <span className="stamp" style={{ display: "block", marginBottom: 4 }}>
                   Output
                 </span>
-                Ranked sites · catchment · yield · design
+                Pond location · catchment · water collected · design
               </div>
               <div style={{ fontSize: 13, color: "var(--ink-2)" }}>
                 <span className="stamp" style={{ display: "block", marginBottom: 4 }}>
                   Scale
                 </span>
-                Village, 1–10 km²
+                Village; drawn areas up to 100 km²
               </div>
             </div>
           </div>
@@ -203,12 +203,27 @@ export function Brief() {
           <div className="bdy">
             {site ? (
               <>
-                <h2 style={{ maxWidth: "24ch" }}>This sheet, read end to end.</h2>
+                <h2 style={{ maxWidth: "24ch" }}>
+                  {analysis?.contour_map ? "This sheet, read end to end." : "This area, read end to end."}
+                </h2>
                 <p style={{ color: "var(--ink-2)", marginTop: 14, maxWidth: "60ch" }}>
-                  {num(analysis?.contour_map.lines_parsed ?? 0)} contour lines
-                  {analysis?.contour_map.contour_interval_m != null &&
-                    ` at ${num(analysis.contour_map.contour_interval_m, 1)} m`}
-                  , reduced to a ranked proposal.
+                  {analysis?.contour_map ? (
+                    <>
+                      {num(analysis.contour_map.lines_parsed)} contour lines
+                      {analysis.contour_map.contour_interval_m != null &&
+                        ` at ${num(analysis.contour_map.contour_interval_m, 1)} m`}
+                      , reduced to a ranked proposal.
+                    </>
+                  ) : (
+                    <>
+                      A{" "}
+                      {analysis?.terrain_source.area_km2 != null
+                        ? `${num(analysis.terrain_source.area_km2, 2)} km²`
+                        : ""}{" "}
+                      area selected on the map, read from the Copernicus 30 m terrain model and
+                      reduced to a ranked proposal.
+                    </>
+                  )}
                 </p>
                 <div className="readings" style={{ marginTop: 26 }}>
                   <div>
@@ -230,12 +245,16 @@ export function Brief() {
                     </div>
                   </div>
                   <div>
-                    <span className="stamp">Storage</span>
+                    <span className="stamp">Water collected</span>
                     <div className="v">
-                      {pond ? volume(pond.gross_capacity_m3) : "—"}
+                      {site.expected_water?.volume_m3 != null
+                        ? volume(site.expected_water.volume_m3)
+                        : "—"}
                     </div>
                     <div className="sub">
-                      {pond ? `${num(pond.depth_m, 2)} m deep` : "no design was sized"}
+                      {pond
+                        ? `a year · ${volume(pond.gross_capacity_m3)} pond, ${num(pond.depth_m, 2)} m deep`
+                        : "no design was sized"}
                     </div>
                   </div>
                   <div>
@@ -254,10 +273,10 @@ export function Brief() {
               <>
                 <h2 style={{ maxWidth: "26ch" }}>Nothing has been analysed yet.</h2>
                 <p style={{ color: "var(--ink-2)", marginTop: 14, maxWidth: "58ch" }}>
-                  Upload a contour survey in the workspace and this block reports that run — the
-                  ranked site, the area draining to it, the storage the ground will give and how many
-                  months of the year it holds water. The figures are read from the analysis, never
-                  written into the page.
+                  Upload a contour survey or draw an area in the workspace, and this block reports
+                  that run — the ranked site, the area draining to it, the water it can collect and
+                  how many months of the year it holds water. The figures are read from the analysis,
+                  never written into the page.
                 </p>
                 <p style={{ marginTop: 22 }}>
                   <Link className="act" to="/workspace">

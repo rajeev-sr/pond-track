@@ -59,6 +59,13 @@ export function Method() {
           area and distance are computed in metres. Nothing about the location is fixed in the code:
           a sheet is resolved to whichever UTM zone it falls in, in either hemisphere.
         </p>
+        <p>
+          <b>With no sheet, an area drawn on the map.</b> The rectangle is analysed on the
+          Copernicus GLO-30 elevation model, read for the rectangle plus a 500 m margin and
+          resampled bilinearly onto a 30 m grid in the same UTM zone. The margin is there for the
+          catchments: water reaches a site from beyond the line that was drawn. Sites are proposed
+          only inside the rectangle. From here on both inputs share every stage.
+        </p>
 
         <h2 id="flow">2 · Flow</h2>
         <p>
@@ -164,6 +171,12 @@ export function Method() {
           (1912) and the Rational method. Design yield is the 75 % dependable value from the annual
           series, which is the basis used for minor irrigation works.
         </p>
+        <p>
+          <b>Water collected</b> — the figure on each site marker — is the smaller of the pond&rsquo;s
+          live storage and that 75 % dependable inflow. Storage the catchment cannot fill in a normal
+          year is not collected, and inflow beyond what the pond holds spills. It is reported per
+          site and never added up: catchments nest, so a total would count the same water twice.
+        </p>
 
         <h2 id="design">6 · Design</h2>
         <p>
@@ -195,6 +208,12 @@ export function Method() {
           <li>
             <b>The surface is interpolated, not surveyed.</b> A hollow smaller than the contour
             interval cannot appear in it at all.
+          </li>
+          <li>
+            <b>A drawn area sees terrain at 30 m.</b> A 140 m pond spans about five cells, and the
+            model includes tree canopy and roofs. On the sample sheet it agrees with the 5 m
+            contour surface at r = 0.91, but none of its candidates lies within 430 m of
+            the contour-derived site. Use it to screen a village; upload contours where a survey exists.
           </li>
           <li>
             <b>Flow is routed to a single neighbour.</b> On genuinely flat ground this gives parallel

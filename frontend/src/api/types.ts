@@ -27,13 +27,15 @@ export interface ContourMapSummary {
   warnings: string[];
 }
 
+/** The grid the analysis ran on. The contour-only fields are absent for a
+ *  drawn area, whose grid is Copernicus resampled rather than interpolated. */
 export interface InterpolatedTerrain {
   grid_resolution_m: number;
   grid_resolution_derived: boolean;
-  mean_contour_spacing_m: number;
+  mean_contour_spacing_m?: number;
   grid_size: [number, number];
   grid_cells: number;
-  hull_coverage_pct: number;
+  hull_coverage_pct?: number;
   interpolation_method: string;
   depressions_filled_cells: number;
   deepest_depression_m: number;
@@ -94,6 +96,10 @@ export interface CandidateSite {
     annual_mean?: { runoff_depth_mm: number; runoff_volume_m3: number; runoff_coefficient: number };
     design_75_percent_dependable?: { runoff_depth_mm: number; runoff_volume_m3: number };
   };
+  /** What this site's pond can collect in a normal year: the smaller of its
+   *  live storage and the catchment's 75 % dependable inflow. Per site only --
+   *  catchments nest, so these are never added up. */
+  expected_water?: ExpectedWater;
   pond?: {
     available: boolean;
     reason?: string;
@@ -136,6 +142,59 @@ export interface CandidateSite {
       }[];
     };
   };
+}
+
+export interface ExpectedWater {
+  volume_m3: number | null;
+  limited_by: "storage" | "inflow" | null;
+  basis: string;
+  pond_capacity_m3: { gross: number | null; live: number | null };
+  annual_inflow_m3: { mean: number | null; dependable_75_percent: number | null };
+}
+
+/** `[min_lon, min_lat, max_lon, max_lat]` in WGS84 degrees. */
+export type Bbox = [number, number, number, number];
+
+/** Where the terrain came from: the uploaded sheet, or Copernicus for a drawn
+ *  rectangle. Present on every run, so the UI never has to infer it. */
+export interface TerrainSource {
+  kind: "uploaded_contour_map" | "copernicus_glo30";
+  dataset: string;
+  resolution_m: number;
+  working_crs_epsg: number;
+  bounds_4326: Bbox;
+  relief_m?: number | null;
+  // contour upload
+  filename?: string | null;
+  contour_interval_m?: number | null;
+  // drawn area
+  provider?: string;
+  licence?: string;
+  area_km2?: number;
+  buffer_m?: number | null;
+  grid_size?: [number, number];
+  cells_inside_area?: number;
+  tiles_used?: string[];
+  cached?: boolean;
+  elevation_min_m?: number | null;
+  elevation_max_m?: number | null;
+  coverage_pct?: number | null;
+  note?: string;
+}
+
+/** The three results the brief asks for, for the recommended site. */
+export interface AnalysisSummary {
+  available: boolean;
+  reason?: string;
+  site_rank?: number;
+  suitability_score?: number;
+  pond_location: { lat: number; lon: number } | null;
+  catchment_area_ha: number | null;
+  catchment_area_km2?: number | null;
+  expected_water_volume_m3: number | null;
+  expected_water_volume_basis?: string;
+  expected_water_volume_limited_by?: "storage" | "inflow" | null;
+  annual_inflow_m3?: { mean: number | null; dependable_75_percent: number | null };
 }
 
 export interface StagePoint {
@@ -266,9 +325,15 @@ export interface Environment {
 
 export interface ContourAnalysis {
   analysis_id: string;
+  /** Set when the run came from a job: export is addressed by it. */
+  job_id?: string;
   elapsed_s: number;
   stage_timings_s: Record<string, number>;
-  contour_map: ContourMapSummary;
+  input?: { filename?: string | null; bbox?: Bbox; area_km2?: number };
+  summary: AnalysisSummary;
+  terrain_source: TerrainSource;
+  /** Null on a drawn area: there was no sheet to read. */
+  contour_map: ContourMapSummary | null;
   interpolated_terrain: InterpolatedTerrain;
   area_of_interest: GeoJSON.Geometry;
   suitability: {
@@ -413,6 +478,17 @@ export interface TerrainLayer {
     size_bytes: number;
     stats: Record<string, number>;
   };
+}
+
+/** Slope or shaded relief as one image pinned to the grid's four corners
+ *  (top-left, top-right, bottom-right, bottom-left). Needs no tile server. */
+export interface TerrainOverlay {
+  product: "hillshade" | "slope";
+  url: string;
+  coordinates: [[number, number], [number, number], [number, number], [number, number]];
+  legend: string;
+  resolution_m: number;
+  size_px: [number, number];
 }
 
 export interface TerrainDerivatives {

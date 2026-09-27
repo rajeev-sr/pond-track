@@ -38,7 +38,7 @@ export function JobProgress({ status }: { status: JobStatus | null }) {
         <span>
           {status.current_step_label ??
             (status.state === "queued"
-              ? "Waiting for a worker"
+              ? "Queued: this server runs one analysis at a time, and yours starts when the one ahead finishes"
               : "Finishing up")}
         </span>
         <strong className="job-pct">{pct}%</strong>

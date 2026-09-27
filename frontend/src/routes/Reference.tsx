@@ -19,9 +19,21 @@ const INTERFACES = [
   },
 ];
 
+/** What one deployment can take, and what a user sees beyond it. Stated here
+ *  because a limit a user discovers by hitting it reads as a fault. */
+const LIMITS = [
+  ["Drawn area", "0.1 to 100 km², on Copernicus 30 m terrain"],
+  ["Contour upload", "KML or KMZ, up to 50 MB"],
+  ["At once", "One analysis per server, four servers behind one address"],
+  ["Beyond that", "A run waits its turn — the progress bar says it is queued; a direct API call is answered 503 with a Retry-After time"],
+  ["Results", "Kept for 24 hours; a drawn area's terrain is cached, so running it again is fast"],
+];
+
 const ROUTES = [
   ["POST /api/v1/analyzeContour", "Ranked sites, catchments and designs — the whole analysis"],
   ["POST /api/v1/findCatchment", "The same, under the name the brief uses"],
+  ["POST /api/v1/analyzeArea", "The whole analysis for a rectangle drawn on the map — no file"],
+  ["POST /api/v1/analysis/area", "The same as a job, polled — what the workspace uses"],
   ["POST /api/v1/terrain/contour-map", "Parsed sheet and interpolated surface, without siting"],
   ["POST /api/v1/terrain/derivatives", "Slope and shaded relief as tiled rasters"],
   ["POST /api/v1/hydrology/streams", "Drainage network, clipped to a catchment or whole-sheet"],
@@ -32,7 +44,7 @@ const ROUTES = [
 ];
 
 const SOURCES = [
-  ["Elevation", "Copernicus GLO-30", "Copernicus"],
+  ["Elevation (drawn area)", "Copernicus DEM GLO-30 · ESA, via AWS Open Data", "Free, attribution"],
   ["Land cover", "ESA WorldCover 10 m", "CC BY 4.0"],
   ["Soil", "ISRIC SoilGrids", "CC BY 4.0"],
   ["Features", "OpenStreetMap via Overpass", "ODbL"],
@@ -100,14 +112,35 @@ export function Reference() {
       <div className="blk">
         <div className="mgn">
           <div className="no">C</div>
+          <span className="stamp">Limits</span>
+        </div>
+        <div className="bdy">
+          <h3 style={{ marginBottom: 16 }}>What one deployment takes</h3>
+          <table className="svy">
+            <tbody>
+              {LIMITS.map(([what, limit]) => (
+                <tr key={what}>
+                  <td style={{ whiteSpace: "nowrap" }}>{what}</td>
+                  <td>{limit}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="blk">
+        <div className="mgn">
+          <div className="no">D</div>
           <span className="stamp">Sources</span>
         </div>
         <div className="bdy" style={{ paddingBottom: 60 }}>
           <h3 style={{ marginBottom: 16 }}>Data and attribution</h3>
           <p style={{ color: "var(--ink-2)", marginBottom: 18, maxWidth: "58ch" }}>
-            Elevation for a run comes from the contour sheet you upload. The layers below supply
-            everything the terrain cannot say — what is already on the ground, what the soil does
-            with rain, and how much rain there is.
+            Elevation for a run comes from the contour sheet you upload, or, for an area drawn on
+            the map, from Copernicus GLO-30. The other layers supply everything the terrain cannot
+            say — what is already on the ground, what the soil does with rain, and how much rain
+            there is.
           </p>
           <table className="svy">
             <thead>

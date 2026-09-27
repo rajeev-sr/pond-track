@@ -35,11 +35,11 @@ STUDENT = "Rajeev Kumar"
 ROLL = "12341700"
 COURSE = "CSD — Assignment 1"
 GITHUB = "https://github.com/rajeev-sr/pond-track"
-#: The deployed instance, verified reachable: nginx on 3272 serves the app and
+#: The deployed instance, verified reachable: the gateway on 3274 serves the app and
 #: reverse-proxies the API under the same origin, so one URL covers the route and
 #: its documentation. Overridable, because whether it is up is a fact about the
 #: host and not about this repository.
-API_BASE = "http://10.1.75.53:3272"
+API_BASE = "http://10.1.75.53:3274"
 LOCAL_BASE = "http://localhost:8000"
 
 
@@ -64,6 +64,25 @@ def img(name: str) -> str:
             )
             return f"data:{mime};base64,{base64.b64encode(candidate.read_bytes()).decode()}"
     sys.exit(f"missing screenshot: {ASSETS / name}")
+
+
+def _endpoint_table() -> str:
+    """Every route the report lists, as the deployed instance answered it."""
+    cap = load("endpoints.json")
+    rows = "\n".join(
+        f'<tr><td><code>{E(r["endpoint"])}</code></td><td>{E(r["method"])}</td>'
+        f'<td class="n">{E(r["result"])}</td></tr>'
+        for r in cap["rows"]
+    )
+    errors = cap["errors"]
+    return f"""<table class="d">
+<thead><tr><th>Endpoint</th><th>Method</th><th class="n">Result</th></tr></thead>
+<tbody>{rows}</tbody></table>
+<p>Malformed requests are rejected with a problem document rather than a stack trace: no file →
+{errors["no file"]} naming <code>contour_map</code>; both field names → {errors["both field names"]};
+a non-contour extension → {errors["a non-contour extension"]}; a <code>.kml</code> that is not XML →
+{errors["a .kml that is not XML"]}; an unknown job id → {errors["an unknown job id"]}.</p>
+<p class="small">Called by {_source('endpoints.json')}, at {E(cap["captured_at"])}.</p>"""
 
 
 def _ready_line() -> str:
@@ -162,6 +181,7 @@ table.d tbody tr:last-child td { border-bottom:0; }
 .note.warn { border-left-color:var(--earth); }
 .note.stop { border-left-color:var(--alert); }
 .note b { color:var(--ink); }
+.small { font-size:7.8pt; color:var(--ink3); margin-top:-1.5mm; }
 
 /* figures */
 figure.plate { margin:0 0 4.4mm; border:.6pt solid var(--rule2); break-inside:avoid; }
@@ -203,10 +223,11 @@ def sec_cover(a: dict, api_base: str) -> str:
     cm = a["contour_map"]
     return f"""<section class="cover">
 <span class="stamp">{E(COURSE)}</span>
-<h1>Contour — catchment estimation and<br>pond siting from a contour map</h1>
-<p class="lede">A backend service that reads a contour survey, reconstructs the terrain,
-delineates the catchment above each candidate pond site, and returns the result as
-structured JSON.</p>
+<h1>Contour — catchment estimation and<br>pond siting for a village</h1>
+<p class="lede">A web application and API that takes a contour survey, or an area selected on
+the map, reconstructs the terrain, delineates the catchment above each candidate pond site, and
+returns the pond location, the catchment area and the water it can collect — as JSON, and
+overlaid on the map.</p>
 <table class="meta">
   <tr><td><span>Submitted by</span></td><td>{E(STUDENT)} &nbsp;·&nbsp; Roll {E(ROLL)}</td></tr>
   <tr><td><span>GitHub repository</span></td>
@@ -215,7 +236,8 @@ structured JSON.</p>
       <td><a href="{E(api_base)}/">{E(api_base)}</a></td></tr>
   <tr><td><span>API route</span></td>
       <td><code>POST {E(api_base)}/api/v1/analyzeContour</code><br>
-          <code>POST {E(api_base)}/api/v1/findCatchment</code> &nbsp;(alias)</td></tr>
+          <code>POST {E(api_base)}/api/v1/findCatchment</code> &nbsp;(alias)<br>
+          <code>POST {E(api_base)}/api/v1/analyzeArea</code> &nbsp;(an area selected on the map)</td></tr>
   <tr><td><span>API documentation</span></td>
       <td><a href="{E(api_base)}/docs">{E(api_base)}/docs</a> (Swagger UI) &nbsp;·&nbsp;
           <a href="{E(api_base)}/redoc">/redoc</a> &nbsp;·&nbsp;
@@ -246,7 +268,27 @@ def sec_requirements(api_base: str) -> str:
             "Request, response and screenshots",
             "§4",
         ),
-        ("API documentation", "All 29 routes, schemas and the interactive spec", "§5"),
+        (
+            "Select a land area on the map",
+            "Draw a rectangle, or one click for the sample area",
+            "§5",
+        ),
+        (
+            "Pond location, catchment area and water collected for that area",
+            "The <code>summary</code> block and every candidate",
+            "§5",
+        ),
+        (
+            "Results overlaid on the map",
+            "Volume on the marker, catchment labelled, popup with all three",
+            "§5",
+        ),
+        (
+            "Fast and functional on the lab systems",
+            "Gateway, one analysis per system, measured under load",
+            "§6",
+        ),
+        ("API documentation", "Every route, schemas and the interactive spec", "§7"),
     ]
     body = "\n".join(
         f'<tr><td><span class="tick">✓</span> {E(what)}</td><td>{where}</td>'
@@ -296,10 +338,14 @@ def sec_api_route(a: dict, api_base: str) -> str:
     <td>Alias of the above, byte-for-byte the same response</td></tr>
 <tr><td>POST</td><td><code>{E(api_base)}/api/v1/analysis</code></td>
     <td>The same work as a background job, for large sheets</td></tr>
+<tr><td>POST</td><td><code>{E(api_base)}/api/v1/analyzeArea</code></td>
+    <td>No file: a rectangle selected on the map, analysed on Copernicus 30 m terrain (§5)</td></tr>
+<tr><td>POST</td><td><code>{E(api_base)}/api/v1/analysis/area</code></td>
+    <td>The same as a job — what the web application uses</td></tr>
 </tbody></table>
 
 <h3>Request</h3>
-<p><code>multipart/form-data</code>. Only <code>file</code> is required.</p>
+<p><code>multipart/form-data</code>. Only the map is required, as <code>contour_map</code> (or its alias <code>file</code>).</p>
 <table class="d">
 <thead><tr><th>Field</th><th>Type</th><th>Default</th><th>Meaning</th></tr></thead>
 <tbody>
@@ -317,36 +363,16 @@ def sec_api_route(a: dict, api_base: str) -> str:
 <h3>Verification</h3>
 <p>The transcript in §4 is a real call against a running instance; the response was
 {n(len((ASSETS / 'analysis.json').read_bytes()))} bytes of JSON returned in
-{n(a['elapsed_s'], 2)} s. Readiness is separately reportable:</p>
-<pre>$ curl {E(api_base)}/api/v1/health/ready
-{{"status": "ready", "checks": {{"database": {{"status": "ok"}}, "redis": {{"status": "ok"}}}}, ...}}</pre>
-<div class="note"><b>Every figure in this report was measured against the URL above.</b>
-The response quoted in §4 is that instance answering, not a local run. Readiness at the time of
-capture:</div>
+{n(a['elapsed_s'], 2)} s.</p>
+<div class="note"><b>The response quoted in §4 was measured against the URL above</b> — that
+instance answering, not a local run. The captures behind §5 and §6 each name their own source
+beneath them. Readiness at the time of capture (Redis is optional: without it, a job is kept by
+the API process that runs it, and the gateway sends each browser back to that process):</div>
 <pre>$ curl {E(api_base)}/api/v1/health/ready
 {E(_ready_line())}</pre>
 
 <h3>Endpoints verified on the deployed instance</h3>
-<table class="d">
-<thead><tr><th>Endpoint</th><th>Method</th><th class="n">Result</th></tr></thead>
-<tbody>
-<tr><td><code>/api/v1/analyzeContour</code> <small>with <code>contour_map</code></small></td><td>POST</td><td class="n">200 · 195 KB</td></tr>
-<tr><td><code>/api/v1/findCatchment</code></td><td>POST</td><td class="n">200</td></tr>
-<tr><td><code>/api/v1/terrain/contour-map</code></td><td>POST</td><td class="n">200</td></tr>
-<tr><td><code>/api/v1/terrain/contours</code></td><td>POST</td><td class="n">200 · 343 KB</td></tr>
-<tr><td><code>/api/v1/terrain/derivatives</code></td><td>POST</td><td class="n">200</td></tr>
-<tr><td><code>/api/v1/hydrology/streams</code></td><td>POST</td><td class="n">200 · 251 KB</td></tr>
-<tr><td><code>/api/v1/hydrology/catchment</code></td><td>POST</td><td class="n">200 · 30 KB</td></tr>
-<tr><td><code>/api/v1/land/available</code></td><td>POST</td><td class="n">200 · 132 parcels</td></tr>
-<tr><td><code>/api/v1/land/cadastral</code></td><td>POST</td><td class="n">200</td></tr>
-<tr><td><code>/api/v1/analysis</code> → status → result → export</td><td>POST/GET</td><td class="n">202 → 200 → 200</td></tr>
-<tr><td><code>/api/v1/suitability/analyze</code> → sites → compare</td><td>POST/GET</td><td class="n">202 → 200 → 200</td></tr>
-<tr><td><code>/api/v1/reports/generate</code> → download</td><td>POST/GET</td><td class="n">201 → 200 · 4-page PDF</td></tr>
-<tr><td><code>/docs</code> · <code>/redoc</code> · <code>/openapi.json</code></td><td>GET</td><td class="n">200 · 200 · 200</td></tr>
-</tbody></table>
-<p>Malformed requests are rejected with a problem document rather than a stack trace: no file →
-400 naming <code>contour_map</code>; both field names → 400; a non-contour extension → 400; a
-<code>.kml</code> that is not XML → 422; an unknown job id → 404.</p>"""
+{_endpoint_table()}"""
 
 
 def sec_approach(a: dict, streams_site: dict, streams_sheet: dict) -> str:
@@ -550,6 +576,178 @@ HTTP 200 · {n(len((ASSETS / 'analysis.json').read_bytes()))} bytes · {n(a['ela
         'hydrology')}"""
 
 
+def _source(name: str) -> str:
+    """Where a capture came from, as recorded in captures.json."""
+    path = ASSETS / "captures.json"
+    sources = json.loads(path.read_text()) if path.exists() else {}
+    return E(sources.get(name, "not recorded"))
+
+
+def sec_area(area: dict, cmp: dict, api_base: str) -> str:
+    s = area["summary"]
+    ts = area["terrain_source"]
+    bbox = area["input"]["bbox"]
+    loc = s["pond_location"]
+    inflow = s.get("annual_inflow_m3") or {}
+    sites = "\n".join(
+        f'<tr><td class="n">{site["rank"]}</td>'
+        f'<td class="mono">{site["location"]["lat"]:.5f}, {site["location"]["lon"]:.5f}</td>'
+        f'<td class="n">{n(site["catchment"]["metrics"]["area_ha"], 1)} ha</td>'
+        f'<td class="n">{n((site.get("expected_water") or {}).get("volume_m3"))} m³</td>'
+        f'<td>{E(str((site.get("expected_water") or {}).get("limited_by") or "—"))}</td></tr>'
+        for site in area["candidate_sites"]
+    )
+    c, d, g = cmp["contour"], cmp["drawn"], cmp["agreement"]
+    return f"""<h2>5 · Selecting an area on the map</h2>
+<p>A village without a contour survey can still be assessed. In the workspace, <b>Draw area on
+map</b> turns a drag on the map into a rectangle; its size is shown while it is drawn, and
+<b>Run</b> refuses anything under 0.1 km² or over 100 km² before a request is made. <b>Use the
+sample area</b> draws the sample sheet's own extent in one click. The terrain comes from the
+Copernicus GLO-30 elevation model, read for the rectangle plus a 500 m margin — water reaches a
+site from beyond the line that was drawn — and sites are proposed only inside the rectangle.
+From there every stage is the pipeline of §3.</p>
+{figure('ui-area.jpg', '4', 'a selected area, analysed: the recommended site carries the water it collects, its catchment is labelled', 'selected area')}
+{figure('ui-area-popup.jpg', '5', 'clicking a site: pond location, catchment area, water collected and inflow', 'popup')}
+<h3>5.1 The same through the API</h3>
+<pre>curl -X POST {E(api_base)}/api/v1/analyzeArea \\
+  -H 'Content-Type: application/json' \\
+  -d '{{"bbox": [{", ".join(f"{v:g}" for v in bbox)}]}}'</pre>
+<p>The response has the shape of a contour analysis, with <code>contour_map</code> null and
+<code>terrain_source</code> naming {E(ts['dataset'])} at {n(ts['resolution_m'])} m. It opens with the
+three results:</p>
+<table class="d">
+<thead><tr><th>Result</th><th class="n">Value</th><th>Basis</th></tr></thead>
+<tbody>
+<tr><td>Pond location</td><td class="n">{loc['lat']:.5f}, {loc['lon']:.5f}</td>
+    <td>Site {s['site_rank']}, suitability {n(s['suitability_score'], 1)}/100</td></tr>
+<tr><td>Catchment area</td><td class="n">{n(s['catchment_area_ha'], 1)} ha</td>
+    <td>{n(s.get('catchment_area_km2'), 2)} km² draining to the site, delineated by D8 on the conditioned surface</td></tr>
+<tr><td>Water collected</td><td class="n">{n(s['expected_water_volume_m3'])} m³ a year</td>
+    <td>{E(s['expected_water_volume_basis'])}; limited by {E(str(s.get('expected_water_volume_limited_by')))}.
+        Inflow {n(inflow.get('mean'))} m³ mean, {n(inflow.get('dependable_75_percent'))} m³ in three years of four</td></tr>
+</tbody></table>
+<p>Every candidate carries the same figure for itself. They are never added up: catchments
+nest, so a total would count the same water twice.</p>
+<table class="d">
+<thead><tr><th class="n">#</th><th>Pond location</th><th class="n">Catchment</th><th class="n">Collects</th><th>Limited by</th></tr></thead>
+<tbody>{sites}</tbody></table>
+<p class="small">Captured from {_source('area.json')}.</p>
+<h3>5.2 How much 30 m terrain costs</h3>
+<p>Over the sample sheet's own extent, the same land analysed both ways
+({n(cmp['area_km2'], 2)} km², enrichment off so only the terrain differs):</p>
+<table class="d">
+<thead><tr><th></th><th>Contour upload</th><th>Selected area</th></tr></thead>
+<tbody>
+<tr><td>Grid</td><td>{c['grid'][0]} × {c['grid'][1]} at {n(c['cell_m'])} m</td>
+    <td>{d['grid'][0]} × {d['grid'][1]} at {n(d['cell_m'])} m, with the margin</td></tr>
+<tr><td>Relief</td><td>{n(c['relief_m'], 1)} m</td><td>{n(d['relief_m'], 1)} m</td></tr>
+<tr><td>Recommended site</td>
+    <td>score {n(c['recommended']['score'], 1)} · {n(c['recommended']['catchment_ha'])} ha</td>
+    <td>score {n(d['recommended']['score'], 1)} · {n(d['recommended']['catchment_ha'])} ha</td></tr>
+</tbody></table>
+<p>Elevations agree at r = {g['correlation']:.3f} over {n(g['samples'])} points, with a constant
+offset of {g['bias_m']:+.1f} m and {n(g['spread_m'], 1)} m of spread about it. But the sites
+differ: no 30 m candidate lies within {n(cmp['nearest_to_contour_first_m'])} m of the contour
+analysis's recommended site, because each cell covers 36 times the ground. So a selected area
+is a screening tool for any village; where a survey exists, the contour upload is the answer to
+build on. The response says as much in <code>terrain_source.note</code>.</p>"""
+
+
+def _load_rows(capture: dict) -> str:
+    rows = []
+    for level in capture["levels"]:
+        s = level["summary"]
+        rows.append(
+            f'<tr><td>{E(s["scenario"])}</td><td class="n">{s["users"]}</td>'
+            f'<td class="n">{s["ok"]}/{s["requests"]}</td><td class="n">{s["busy_503"]}</td>'
+            f'<td class="n">{n(s["p50_s"], 1)} s</td><td class="n">{n(s["p95_s"], 1)} s</td>'
+            f'<td class="n">{E(s["follow_ups_ok"])}</td></tr>'
+        )
+    return "\n".join(rows)
+
+
+def _memory(capture: dict) -> str:
+    mem = capture.get("memory") or {}
+    peaks = [v["peak_mb"] for v in mem.values() if "peak_mb" in v]
+    ooms = sum(v.get("oom_kills", 0) for v in mem.values())
+    if not peaks:
+        return "not recorded"
+    if "memory_basis" in capture:  # sampled on the lab systems, not read from a container
+        return (
+            f"Process memory peaked at {min(peaks)}–{max(peaks)} MB per system of 512 "
+            f"(sampled each second; sys4's figure includes PostgreSQL), {ooms} OOM kills"
+        )
+    return f"{min(peaks)}–{max(peaks)} MB peak per instance, {ooms} OOM kills"
+
+
+def sec_scaling(jobs: dict, sync: dict, contour: dict, failover: dict) -> str:
+    head = (
+        '<thead><tr><th>Scenario</th><th class="n">Users</th><th class="n">OK</th>'
+        '<th class="n">503</th><th class="n">p50</th><th class="n">p95</th>'
+        '<th class="n">Follow-ups</th></tr></thead>'
+    )
+    return f"""<h2>6 · Performance, stress and scaling</h2>
+<p>The service runs on three lab systems, each with <b>512 MB of memory and one CPU</b> (the
+fourth allocated system, sys1, has not been reachable). One analysis of the sample sheet peaks at
+a few hundred megabytes, so the design starts from one rule: <b>one analysis at a time per
+system</b>, and never a crash in place of an answer.</p>
+<pre>            browser — http://10.1.75.53:3274
+                   │
+      gateway (nginx) on sys2, hash on the browser's id
+      ┌────────────┼────────────┐
+    sys2         sys3         sys4          each: the API and the web UI in one
+    API          API          API           process, restarted if it dies
+                              PostgreSQL    village register, rainfall cache</pre>
+<table class="d">
+<thead><tr><th>Mechanism</th><th>What it does</th></tr></thead>
+<tbody>
+<tr><td>Overload guard</td><td>One analysis per system. A direct API call beyond that is answered at once with
+    <code>503</code> and <code>Retry-After</code>; a run from the web application waits in a queue and says so.</td></tr>
+<tr><td>Affinity</td><td>The page sends a per-browser id, and the gateway hashes on it, so a user's follow-up calls
+    reach the system holding their terrain. Not the client address: every user on one lab subnet would land on
+    one system.</td></tr>
+<tr><td>Health</td><td>An instance that stops answering is taken out of rotation; its users move to the next one and
+    come back when it restarts.</td></tr>
+<tr><td>Memory</td><td>GDAL's cache and glibc's arenas bounded (the first sized itself from the host's RAM); terrain
+    grids kept on disk rather than in memory; finished jobs capped.</td></tr>
+<tr><td>Upstream data</td><td>Terrain, soil, land cover, rainfall and OpenStreetMap all cached on disk; one request per
+    OpenStreetMap window at a time, and a refused window remembered for ten minutes.</td></tr>
+<tr><td>The lab's internet</td><td>From the lab systems, S3, NASA POWER and SoilGrids time out and Open-Meteo answers
+    429, so the 26 terrain tiles covering Chhattisgarh are kept on each system and 30 years of NASA POWER daily
+    rainfall for its 65 cells are in the database. Open-Meteo is left alone for an hour after a refusal, and
+    the rainfall step returns at its deadline with whichever source answered.</td></tr>
+</tbody></table>
+<h3>6.1 Under load</h3>
+<p>Users placed deliberately: one on each system, two on each, or all on one. Web-application
+runs of the sample area (queued, polled each second):</p>
+<table class="d">{head}<tbody>{_load_rows(jobs)}</tbody></table>
+<p class="small">{_memory(jobs)}.</p>
+<p>The same as direct API calls, where overload is answered rather than queued:</p>
+<table class="d">{head}<tbody>{_load_rows(sync)}</tbody></table>
+<p class="small">{_memory(sync)}.</p>
+<p>Contour uploads of the sample sheet (342 550 cells, the heaviest input):</p>
+<table class="d">{head}<tbody>{_load_rows(contour)}</tbody></table>
+<p class="small">{_memory(contour)}.</p>
+<p>Three users on three systems are served as fast as one user on one. A fourth waits its turn
+in the web application, or is told to retry by the API, rather than taking a system down; every
+follow-up call reached its own terrain, and no system was OOM-killed.</p>
+<h3>6.2 One system failing</h3>
+<p>An instance was killed while a user pinned to it kept making requests:
+{failover['failed']} of {failover['requests']} requests failed; the user was served by another
+system at {n(failover['timeline'][1]['t_s'] if len(failover['timeline']) > 1 else 0, 1)} s and back on
+their own at {n(failover['back_on_own_instance_s'], 1)} s.</p>
+<h3>6.3 Limits</h3>
+<table class="d">
+<thead><tr><th>Limit</th><th>Value</th></tr></thead>
+<tbody>
+<tr><td>Selected area</td><td>0.1 to 100 km²</td></tr>
+<tr><td>Contour upload</td><td>KML or KMZ, up to 50 MB</td></tr>
+<tr><td>At once</td><td>One analysis per system, three systems</td></tr>
+<tr><td>Beyond that</td><td>Queued in the web application; <code>503</code> with <code>Retry-After</code> from the API</td></tr>
+</tbody></table>
+<p class="small">Measured by {_source('loadtest-jobs.json')}. Failover: {_source('failover.json')}.</p>"""
+
+
 def sec_apidocs(spec: dict, api_base: str) -> str:
     groups: dict[str, list[tuple[str, str, str]]] = {}
     for path, ops in sorted(spec["paths"].items()):
@@ -570,7 +768,7 @@ def sec_apidocs(spec: dict, api_base: str) -> str:
             f"</thead><tbody>{rows}</tbody></table>"
         )
     total = sum(len(v) for v in groups.values())
-    return f"""<h2>5 · API documentation</h2>
+    return f"""<h2>7 · API documentation</h2>
 <p>The service publishes an OpenAPI {E(spec.get('openapi', '3.1'))} description of all
 {total} operations, browsable three ways:</p>
 <table class="d">
@@ -580,15 +778,17 @@ def sec_apidocs(spec: dict, api_base: str) -> str:
 <tr><td>ReDoc</td><td><code>{E(api_base)}/redoc</code></td><td>Laid out for reading</td></tr>
 <tr><td>Raw spec</td><td><code>{E(api_base)}/openapi.json</code></td><td>Machine-readable, for client generation</td></tr>
 </tbody></table>
-{figure('ui-apidocs.jpg', '4', 'Swagger UI listing the published operations', 'api documentation')}
-<h3>5.1 Every route</h3>
+{figure('ui-apidocs.jpg', '6', 'Swagger UI listing the published operations', 'api documentation')}
+<h3>7.1 Every route</h3>
 {''.join(blocks)}
-<h3>5.2 Response shape</h3>
+<h3>7.2 Response shape</h3>
 <p>A successful analysis returns one object. The blocks a caller is most likely to want:</p>
 <table class="d">
 <thead><tr><th>Key</th><th>Holds</th></tr></thead>
 <tbody>
-<tr><td><code>contour_map</code></td><td>What was read from the file: lines, levels, interval, bounds, chosen CRS</td></tr>
+<tr><td><code>summary</code></td><td>The three results for the recommended site: pond location, catchment area, water collected</td></tr>
+<tr><td><code>terrain_source</code></td><td>Where the terrain came from — the uploaded sheet, or Copernicus GLO-30 for a selected area</td></tr>
+<tr><td><code>contour_map</code></td><td>What was read from the file: lines, levels, interval, bounds, chosen CRS (null for a selected area)</td></tr>
 <tr><td><code>interpolated_terrain</code></td><td>Grid size, cell size, interpolation diagnostics</td></tr>
 <tr><td><code>recommended_site</code></td><td>The top-ranked site, expanded — a copy of <code>candidate_sites[0]</code></td></tr>
 <tr><td><code>candidate_sites[]</code></td><td>Per site: location, score, criteria breakdown, catchment, runoff, pond</td></tr>
@@ -598,7 +798,7 @@ def sec_apidocs(spec: dict, api_base: str) -> str:
 <tr><td><code>explanation</code></td><td>Plain-language summary and caveats for each site</td></tr>
 <tr><td><code>warnings[]</code></td><td>Anything the reader should verify before acting</td></tr>
 </tbody></table>
-<h3>5.3 Errors</h3>
+<h3>7.3 Errors</h3>
 <p>Failures use RFC 9457 problem documents, so a client can branch on
 <code>type</code> rather than parse prose:</p>
 <pre>{{"type": "/errors/validation", "title": "Validation failed", "status": 422,
@@ -619,7 +819,7 @@ def sec_ai() -> str:
     """Disclosure of AI assistance. Kept short and factual; a disclosure that
     editorialises is harder to take at face value than one that simply says what
     happened."""
-    return """<h2>6 &middot; AI usage</h2>
+    return """<h2>8 &middot; AI usage</h2>
 <p>Claude (Anthropic) was used as a coding assistant and to prepare this document.</p>"""
 
 
@@ -628,6 +828,8 @@ def build(api_base: str) -> str:
     spec = load("openapi.json")
     ss = load("streams-site.json")
     sw = load("streams-sheet.json")
+    area = load("area.json")
+    cmp = load("compare-30m-5m.json")
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -640,6 +842,8 @@ def build(api_base: str) -> str:
 {sec_api_route(a, api_base)}
 {sec_approach(a, ss, sw)}
 {sec_demo(a)}
+{sec_area(area, cmp, api_base)}
+{sec_scaling(load("loadtest-jobs.json"), load("loadtest-sync.json"), load("loadtest-contour.json"), load("failover.json"))}
 {sec_apidocs(spec, api_base)}
 {sec_ai()}
 <footer class="colophon">

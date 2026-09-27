@@ -1,39 +1,70 @@
-import { useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 
+import { villageSearchAvailable, withClient } from "../../api/client";
+import type { ContourAnalysis } from "../../api/types";
 import { humanise, num } from "../../format";
-import { useAnalysis } from "../../state/analysis";
+import { AREA_MAX_KM2, bboxAreaKm2, bboxProblem, bboxSizeKm } from "../../geo";
+import { useAnalysis, type InputMode } from "../../state/analysis";
 import { JobProgress } from "../JobProgress";
 import { VillageSearch } from "../VillageSearch";
 
 const ACCEPT = ".kml,.kmz,.xml";
 
+const MODES: { id: InputMode; label: string }[] = [
+  { id: "upload", label: "Upload contour map" },
+  { id: "area", label: "Draw area on map" },
+];
+
 /**
  * The left rail: what the run is, what it was told, and what came back.
  *
  * One card rather than the six stacked panels this replaces. Village search,
- * upload and parameters are all "setting up a run", so they read as one job
+ * the input and parameters are all "setting up a run", so they read as one job
  * sheet; layers moved onto the drawing where map controls belong, and
  * attribution moved to the colophon.
+ *
+ * Two inputs, one Run: a contour sheet uploaded as KML/KMZ, or a rectangle
+ * drawn on the map, which is analysed on the Copernicus 30 m terrain model.
  */
 export function JobSheet() {
   const {
     analysis, options, setOptions, busy, jobStatus, analyse, cancel,
     land, loadingLand, loadLand, village, villageNote, selectVillage, clearVillage,
+    inputMode, setInputMode, drawnArea, setDrawnArea, drawing, setDrawing,
+    pickSampleArea, analyseArea,
   } = useAnalysis();
   const [file, setFile] = useState<File | null>(null);
   const fileInput = useRef<HTMLInputElement | null>(null);
-  const ids = { sites: useId(), slope: useId(), file: useId() };
+  // Hidden until the server says it can search villages: on a system with no
+  // village database the field could only ever answer with an error.
+  const [villagesOn, setVillagesOn] = useState(false);
+  useEffect(() => {
+    let live = true;
+    void villageSearchAvailable().then((on) => live && setVillagesOn(on));
+    return () => {
+      live = false;
+    };
+  }, []);
+  const ids = { sites: useId(), slope: useId(), file: useId(), area: useId() };
 
-  const grid = analysis?.interpolated_terrain;
-  const map = analysis?.contour_map;
-  const tier = analysis?.suitability.analysis_tier;
-  const exclusions = analysis?.suitability.exclusions ?? null;
+  const areaProblem = drawnArea ? bboxProblem(drawnArea) : null;
+  const canRun =
+    inputMode === "upload" ? Boolean(file) : Boolean(drawnArea) && !areaProblem && !drawing;
+  const runNow = () => {
+    if (inputMode === "upload") {
+      if (file) analyse(file);
+    } else if (drawnArea && !areaProblem) {
+      analyseArea(drawnArea);
+    }
+  };
 
   return (
     <aside className="jobsheet" aria-label="Job sheet">
       <section>
         <span className="stamp">Job</span>
-        <VillageSearch onSelect={selectVillage} selectedId={village?.id ?? null} />
+        {villagesOn && (
+          <VillageSearch onSelect={selectVillage} selectedId={village?.id ?? null} />
+        )}
         {villageNote && (
           <p className="note" style={{ fontSize: 12.5, margin: "0 0 12px" }}>
             {villageNote}
@@ -49,25 +80,96 @@ export function JobSheet() {
             Clear village
           </button>
         )}
-        <div className="fld">
-          <label htmlFor={ids.file}>Contour survey</label>
-          <input
-            ref={fileInput}
-            id={ids.file}
-            type="file"
-            accept={ACCEPT}
-            style={{ display: "none" }}
-            onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-          />
-          <button
-            type="button"
-            className="act line"
-            style={{ width: "100%", textTransform: "none", letterSpacing: 0, fontFamily: "var(--sans)", fontSize: 13 }}
-            onClick={() => fileInput.current?.click()}
-          >
-            {file ? file.name : "Choose a KML or KMZ file"}
-          </button>
+
+        <div className="modes" role="tablist" aria-label="Input">
+          {MODES.map((m) => (
+            <button
+              key={m.id}
+              type="button"
+              role="tab"
+              aria-selected={inputMode === m.id}
+              className={inputMode === m.id ? "on" : undefined}
+              disabled={busy}
+              onClick={() => setInputMode(m.id)}
+            >
+              {m.label}
+            </button>
+          ))}
         </div>
+
+        {inputMode === "upload" ? (
+          <div className="fld">
+            <label htmlFor={ids.file}>Contour survey</label>
+            <input
+              ref={fileInput}
+              id={ids.file}
+              type="file"
+              accept={ACCEPT}
+              style={{ display: "none" }}
+              onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+            />
+            <button
+              type="button"
+              className="act line"
+              style={{ width: "100%", textTransform: "none", letterSpacing: 0, fontFamily: "var(--sans)", fontSize: 13 }}
+              onClick={() => fileInput.current?.click()}
+            >
+              {file ? file.name : "Choose a KML or KMZ file"}
+            </button>
+            <p className="area-hint">KML or KMZ contour lines, up to 50 MB.</p>
+          </div>
+        ) : (
+          <div className="fld">
+            <label htmlFor={ids.area}>Area on the map</label>
+            <button
+              id={ids.area}
+              type="button"
+              className={drawing ? "act" : "act line"}
+              aria-pressed={drawing}
+              style={{ width: "100%", textTransform: "none", letterSpacing: 0, fontFamily: "var(--sans)", fontSize: 13 }}
+              disabled={busy}
+              onClick={() => setDrawing(!drawing)}
+            >
+              {drawing
+                ? "Drag on the map · Esc to cancel"
+                : drawnArea
+                  ? "Redraw the rectangle"
+                  : "Draw a rectangle"}
+            </button>
+            <AreaReadout />
+            <div style={{ display: "flex", gap: 8, marginTop: 9 }}>
+              <button
+                type="button"
+                className="act line"
+                style={{ flex: 1, padding: "7px 8px", fontSize: 10.5 }}
+                disabled={busy}
+                onClick={pickSampleArea}
+              >
+                Use the sample area
+              </button>
+              {drawnArea && (
+                <button
+                  type="button"
+                  className="act line"
+                  style={{ padding: "7px 10px", fontSize: 10.5 }}
+                  disabled={busy}
+                  onClick={() => {
+                    setDrawnArea(null);
+                    setDrawing(false);
+                  }}
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+            <p className="area-hint">
+              Terrain comes from the Copernicus 30 m global model, fetched for the rectangle plus a
+              500 m margin. Up to {AREA_MAX_KM2} km². Coarser than a surveyed sheet: use it to screen
+              a village, and upload contours where a survey exists.
+            </p>
+          </div>
+        )}
+
         {busy ? (
           <button type="button" className="act line" style={{ width: "100%" }} onClick={cancel}>
             Cancel
@@ -77,8 +179,8 @@ export function JobSheet() {
             type="button"
             className="act"
             style={{ width: "100%" }}
-            disabled={!file}
-            onClick={() => file && analyse(file)}
+            disabled={!canRun}
+            onClick={runNow}
           >
             Run
           </button>
@@ -134,64 +236,7 @@ export function JobSheet() {
         </label>
       </section>
 
-      {analysis && (
-        <section>
-          <span className="stamp">Read-back</span>
-          <div className="readback">
-            <div className="pair">
-              <span>Lines read</span>
-              <span>{num(map?.lines_parsed ?? 0)}</span>
-            </div>
-            <div className="pair">
-              <span>Levels</span>
-              <span>
-                {map?.levels ?? "—"}
-                {map?.contour_interval_m != null && ` · ${num(map.contour_interval_m, 1)} m`}
-              </span>
-            </div>
-            <div className="pair">
-              <span>Relief</span>
-              <span>{num(map?.relief_m ?? 0, 1)} m</span>
-            </div>
-            <div className="pair">
-              <span>Elevations from</span>
-              <span>{map ? humanise(map.elevation_strategy) : "—"}</span>
-            </div>
-            <div className="pair">
-              <span>Grid</span>
-              <span>
-                {grid ? `${grid.grid_size[0]} × ${grid.grid_size[1]}` : "—"}
-              </span>
-            </div>
-            <div className="pair">
-              <span>Data tier</span>
-              <span className={tier === "full" ? "tag v" : "tag e"}>
-                {tier ? humanise(tier) : "—"}
-              </span>
-            </div>
-            {exclusions && (
-              <div className="pair">
-                <span>Exclusions</span>
-                <span
-                  className={
-                    exclusions.confidence === "high"
-                      ? "tag v"
-                      : exclusions.confidence === "partial"
-                        ? "tag e"
-                        : "tag a"
-                  }
-                >
-                  {exclusions.confidence}
-                </span>
-              </div>
-            )}
-            <div className="pair">
-              <span>Elapsed</span>
-              <span>{num(analysis.elapsed_s, 2)} s</span>
-            </div>
-          </div>
-        </section>
-      )}
+      {analysis && <ReadBack analysis={analysis} />}
 
       {analysis && (
         <section>
@@ -213,13 +258,15 @@ export function JobSheet() {
         </section>
       )}
 
-      {analysis && (
+      {analysis?.job_id && (
         <section>
           <span className="stamp">Issue</span>
           <div style={{ display: "grid", gap: 8 }}>
+            {/* Addressed by the job, not by `analysis_id`: export reads the job
+                store, and the analysis id is not a key in it. */}
             <a
               className="act line"
-              href={`/api/v1/export/${analysis.analysis_id}`}
+              href={withClient(`/api/v1/export/${analysis.job_id}`)}
               style={{ textDecoration: "none" }}
             >
               Geometry · GeoJSON
@@ -228,5 +275,124 @@ export function JobSheet() {
         </section>
       )}
     </aside>
+  );
+}
+
+/** The drawn rectangle's size and corners, and why it cannot run if it cannot. */
+function AreaReadout() {
+  const { drawnArea } = useAnalysis();
+  if (!drawnArea) {
+    return (
+      <p className="area-readout is-empty">
+        No area yet. Press the button, then drag a rectangle on the map.
+      </p>
+    );
+  }
+  const km2 = bboxAreaKm2(drawnArea);
+  const { width, height } = bboxSizeKm(drawnArea);
+  const problem = bboxProblem(drawnArea);
+  const [w, s, e, n] = drawnArea;
+  return (
+    <div className={problem ? "area-readout is-bad" : "area-readout"} aria-live="polite">
+      <div className="pair">
+        <b>{num(km2, km2 < 10 ? 2 : 1)} km²</b>
+        <span>
+          {num(width, 2)} × {num(height, 2)} km
+        </span>
+      </div>
+      <div className="corners">
+        {s.toFixed(4)}–{n.toFixed(4)}° N · {w.toFixed(4)}–{e.toFixed(4)}° E
+      </div>
+      {problem && <div className="why">{problem}</div>}
+    </div>
+  );
+}
+
+/** What was read, per input: lines and levels for a sheet; the terrain model,
+ *  area and cache state for a drawn rectangle. */
+function ReadBack({ analysis }: { analysis: ContourAnalysis }) {
+  const grid = analysis.interpolated_terrain;
+  const sheet = analysis.contour_map;
+  const source = analysis.terrain_source;
+  const tier = analysis.suitability.analysis_tier;
+  const exclusions = analysis.suitability.exclusions ?? null;
+  return (
+    <section>
+      <span className="stamp">Read-back</span>
+      <div className="readback">
+        {sheet ? (
+          <>
+            <div className="pair">
+              <span>Lines read</span>
+              <span>{num(sheet.lines_parsed)}</span>
+            </div>
+            <div className="pair">
+              <span>Levels</span>
+              <span>
+                {sheet.levels}
+                {sheet.contour_interval_m != null && ` · ${num(sheet.contour_interval_m, 1)} m`}
+              </span>
+            </div>
+            <div className="pair">
+              <span>Relief</span>
+              <span>{num(sheet.relief_m, 1)} m</span>
+            </div>
+            <div className="pair">
+              <span>Elevations from</span>
+              <span>{humanise(sheet.elevation_strategy)}</span>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="pair">
+              <span>Terrain</span>
+              <span>Copernicus GLO-30</span>
+            </div>
+            <div className="pair">
+              <span>Area</span>
+              <span>{source.area_km2 != null ? `${num(source.area_km2, 2)} km²` : "—"}</span>
+            </div>
+            <div className="pair">
+              <span>Relief</span>
+              <span>{source.relief_m != null ? `${num(source.relief_m, 1)} m` : "—"}</span>
+            </div>
+            <div className="pair">
+              <span>Terrain read</span>
+              <span>{source.cached ? "from cache" : "from Copernicus"}</span>
+            </div>
+          </>
+        )}
+        <div className="pair">
+          <span>Grid</span>
+          <span>
+            {grid.grid_size[0]} × {grid.grid_size[1]} @ {num(grid.grid_resolution_m, 0)} m
+          </span>
+        </div>
+        <div className="pair">
+          <span>Data tier</span>
+          <span className={tier === "full" ? "tag v" : "tag e"}>{humanise(tier)}</span>
+        </div>
+        {exclusions && (
+          <div className="pair">
+            <span>Exclusions</span>
+            <span
+              className={
+                exclusions.confidence === "high"
+                  ? "tag v"
+                  : exclusions.confidence === "partial"
+                    ? "tag e"
+                    : "tag a"
+              }
+            >
+              {exclusions.confidence}
+            </span>
+          </div>
+        )}
+        <div className="pair">
+          <span>Elapsed</span>
+          <span>{num(analysis.elapsed_s, 2)} s</span>
+        </div>
+      </div>
+    </section>
   );
 }

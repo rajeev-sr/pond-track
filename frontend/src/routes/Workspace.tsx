@@ -49,15 +49,25 @@ export function Workspace() {
           streams={s.streams}
           explored={s.explored}
           parcels={s.land?.parcels ?? null}
-          onDelineate={map?.dem_id ? s.explore : null}
+          // Clicks draw while drawing; they delineate only once there is terrain
+          // to delineate on and nothing else wants them.
+          onDelineate={map?.dem_id && !s.drawing ? s.explore : null}
           onSelectSite={s.setSelectedRank}
+          drawing={s.drawing}
+          drawnArea={s.inputMode === "area" ? s.drawnArea : null}
+          onAreaDrawn={(bbox) => {
+            s.setDrawnArea(bbox);
+            s.setDrawing(false);
+          }}
+          onDrawCancel={() => s.setDrawing(false)}
+          frameAreaKey={s.frameAreaKey}
         />
 
         {/* Rendered as soon as there is any layer to control — not only after
             an analysis. Searching a village before uploading a sheet draws its
             outline on the map, and gating the legend on the analysis left no way
             to turn that off again. */}
-        {(s.analysis || s.village) && (
+        {(s.analysis || s.village || s.drawnArea) && (
           <LegendBox
             visibility={s.layers}
             onChange={s.setLayers}
@@ -73,6 +83,7 @@ export function Workspace() {
               parcels: Boolean(s.land),
               village: Boolean(s.village),
               aoi: Boolean(s.analysis),
+              drawn: Boolean(s.drawnArea) && s.inputMode === "area",
             }}
             streamScope={s.streamScope}
             onStreamScopeChange={s.setStreamScope}
@@ -84,7 +95,18 @@ export function Workspace() {
 
         <TitleBlock analysis={s.analysis} />
 
-        {s.exploring && (
+        {s.drawing && (
+          <div className="drawing-note" role="status" aria-live="polite">
+            <div className="panel-head">
+              <span className="stamp">Drawing</span>
+            </div>
+            <div>
+              Press and drag on the map to draw the area to analyse. Release to finish; Esc
+              cancels. The wheel still zooms.
+            </div>
+          </div>
+        )}
+        {!s.drawing && s.exploring && (
           <div className="drawing-note" role="status" aria-live="polite">
             <div className="panel-head">
               <span className="stamp">Delineating</span>
@@ -96,7 +118,7 @@ export function Workspace() {
         {/* A labelled live region, so the result is announced rather than merely
             appearing — and so it is addressable, which the delineation test
             relies on to read back one area per click. */}
-        {!s.exploring && s.explored && (
+        {!s.drawing && !s.exploring && s.explored && (
           <div
             className="drawing-note"
             role="status"
@@ -135,7 +157,7 @@ export function Workspace() {
             delineate is not discoverable otherwise — there is no affordance on a
             map to say it answers clicks — and the previous layout carried the
             same hint in a sidebar panel. */}
-        {s.analysis && !s.exploring && !s.explored && (
+        {s.analysis && !s.drawing && !s.exploring && !s.explored && (
           <div className="drawing-note">
             <div className="panel-head">
               <span className="stamp" id="explored-heading">
@@ -148,20 +170,26 @@ export function Workspace() {
             </div>
           </div>
         )}
-        {!s.analysis && !s.busy && (
+        {!s.analysis && !s.busy && !s.drawing && (
           <div className="drawing-note">
             <div className="panel-head">
               <span className="stamp">Empty sheet</span>
               <MinButton collapsed={noteShut} onToggle={toggleNote} label="this note" />
             </div>
-            <div hidden={noteShut}>Choose a contour survey in the job sheet and press Run.</div>
+            <div hidden={noteShut}>
+              {s.inputMode === "area"
+                ? s.drawnArea
+                  ? "The area is drawn. Press Run in the job sheet."
+                  : "Draw a rectangle on the map, or use the sample area, then press Run."
+                : "Choose a contour survey in the job sheet and press Run — or switch to Draw area on map."}
+            </div>
           </div>
         )}
 
         {s.error && (
           <div className="overlay overlay--error" role="alert">
             <span className="stamp" style={{ display: "block", marginBottom: 6 }}>
-              Could not analyse this file
+              {s.inputMode === "area" ? "Could not analyse this area" : "Could not analyse this file"}
             </span>
             <p style={{ fontSize: 13.5, color: "var(--ink-2)" }}>
               {s.problem?.detail ?? s.error.message}

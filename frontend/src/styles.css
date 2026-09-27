@@ -1616,3 +1616,101 @@ ul.bul li + li { margin-top: 8px; }
   padding: 6px 9px;
   border-right: 0;
 }
+
+/* ── input mode: upload a sheet, or draw an area ─────────────────────────── */
+.modes {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  margin: 2px 0 14px;
+  border: 1px solid var(--rule-2);
+}
+.modes button {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  padding: 8px 6px;
+  background: transparent;
+  border: 0;
+  color: var(--ink-3);
+  cursor: pointer;
+}
+.modes button + button { border-left: 1px solid var(--rule-2); }
+.modes button.on { background: var(--water-bg); color: var(--water); }
+.modes button:disabled { cursor: not-allowed; opacity: 0.6; }
+.modes button:focus-visible { outline: 2px solid var(--water); outline-offset: -2px; }
+
+.area-readout {
+  margin-top: 9px;
+  padding: 8px 10px;
+  border: 1px solid var(--rule);
+  background: var(--paper);
+  font-size: 12.5px;
+  color: var(--ink-2);
+}
+.area-readout b { font-family: var(--mono); font-weight: 600; color: var(--ink); font-size: 13.5px; }
+.area-readout .pair span { font-family: var(--mono); font-size: 11.5px; }
+.area-readout .corners { font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); margin-top: 3px; }
+.area-readout .why { margin-top: 6px; color: var(--alert); font-size: 12px; }
+.area-readout.is-bad { border-color: var(--alert); }
+.area-readout.is-empty { color: var(--ink-3); }
+.area-hint { margin: 10px 0 0; font-size: 11.5px; line-height: 1.45; color: var(--ink-3); }
+
+/* ── drawing on the map ──────────────────────────────────────────────────── */
+.maplibregl-canvas-container.is-drawing,
+.maplibregl-canvas-container.is-drawing .maplibregl-canvas { cursor: crosshair; }
+.draw-readout {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 4;
+  pointer-events: none;
+  font: 600 12px/1 var(--mono);
+  color: #0f1720;
+  background: #ffffff;
+  border: 1px solid #0f1720;
+  padding: 4px 7px;
+  white-space: nowrap;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+}
+.draw-readout.is-bad { color: #ffffff; background: #96331f; border-color: #ffffff; }
+
+/* ── results written on the map ──────────────────────────────────────────── */
+.catchment-label {
+  font: 600 11.5px/1 var(--mono);
+  color: #0e3a4a;
+  background: rgba(207, 250, 254, 0.92);
+  border: 1px solid #22d3ee;
+  padding: 3px 7px;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+}
+/* Above the legend and the notes (3), below the error overlay (5): a popup is
+   asked for, so it wins over the chrome it would otherwise open underneath. */
+.maplibregl-popup.site-popup { z-index: 4; }
+.site-popup .maplibregl-popup-content {
+  background: var(--paper);
+  color: var(--ink);
+  border: 1px solid var(--rule-2);
+  border-radius: 0;
+  padding: 11px 13px 10px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+  font-family: var(--sans);
+}
+.site-popup .maplibregl-popup-tip { border-top-color: var(--paper); border-bottom-color: var(--paper); }
+.site-popup .maplibregl-popup-close-button { color: var(--ink-3); font-size: 16px; padding: 2px 6px; }
+.site-popup .sp-title {
+  font: 600 10.5px/1.2 var(--mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--earth);
+  margin: 0 18px 8px 0;
+}
+.site-popup dl { display: grid; grid-template-columns: auto 1fr; gap: 5px 12px; margin: 0; }
+.site-popup dt { font-size: 12px; color: var(--ink-3); }
+.site-popup dd { margin: 0; font: 500 12.5px/1.35 var(--mono); color: var(--ink); text-align: right; }
+.site-popup dd small { display: block; font: 400 10.5px/1.35 var(--sans); color: var(--ink-3); }
+
+.svy tr.key-result td { font-weight: 600; }
+.svy tr.key-result td.n { color: var(--water); }

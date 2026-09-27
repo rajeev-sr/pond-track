@@ -1,7 +1,10 @@
 import maplibregl, { type Map as MapLibreMap } from "maplibre-gl";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
-import type { ContourAnalysis, TerrainLayer } from "../api/types";
+import type { Bbox, CandidateSite, ContourAnalysis, TerrainOverlay } from "../api/types";
+import { num } from "../format";
+import { AREA_MAX_KM2, AREA_MIN_KM2, bboxAreaKm2, bboxPolygon } from "../geo";
+import { startAreaDraw } from "./draw/AreaDraw";
 
 export interface LayerVisibility {
   hillshade: boolean;
@@ -15,6 +18,8 @@ export interface LayerVisibility {
   sites: boolean;
   aoi: boolean;
   village: boolean;
+  /** The rectangle drawn on the map, before and after it is run. */
+  drawn: boolean;
 }
 
 /** A selected village's outline, and what that outline actually is.
@@ -39,8 +44,8 @@ interface Props {
   selectedRank: number | null;
   basemap: BasemapId;
   village: VillageOutline | null;
-  /** Terrain raster layers from POST /terrain/derivatives, if any were built. */
-  terrain: TerrainLayer[];
+  /** Slope and shaded relief as images, from GET /terrain/{dem_id}/overlays. */
+  terrain: TerrainOverlay[];
   /** Drainage network from POST /hydrology/streams, if it was fetched. */
   streams: GeoJSON.FeatureCollection | null;
   /** A catchment the user delineated by clicking, distinct from the analysis'. */
@@ -50,6 +55,14 @@ interface Props {
   /** Called with lon/lat when the user clicks bare map. Null disables it. */
   onDelineate: ((lon: number, lat: number) => void) | null;
   onSelectSite: (rank: number) => void;
+  /** While true, dragging draws a rectangle instead of panning the map. */
+  drawing: boolean;
+  /** The rectangle to show as the selected area, or null. */
+  drawnArea: Bbox | null;
+  onAreaDrawn: (bbox: Bbox) => void;
+  onDrawCancel: () => void;
+  /** Changes when the map should frame `drawnArea` (the sample-area button). */
+  frameAreaKey: number;
 }
 
 /**
@@ -170,6 +183,16 @@ function boundsOf(
   ];
 }
 
+type LngLatBox = [[number, number], [number, number]];
+
+function unionBounds(a: LngLatBox | null, b: LngLatBox | null): LngLatBox | null {
+  if (!a || !b) return a ?? b;
+  return [
+    [Math.min(a[0][0], b[0][0]), Math.min(a[0][1], b[0][1])],
+    [Math.max(a[1][0], b[1][0]), Math.max(a[1][1], b[1][1])],
+  ];
+}
+
 function sitesToGeoJSON(
   analysis: ContourAnalysis | null,
 ): GeoJSON.FeatureCollection {
@@ -261,6 +284,114 @@ function pondFootprint(
   };
 }
 
+/** What a site's pond would collect in a year, as its marker label shows it. */
+function siteLabel(site: CandidateSite): string {
+  const m3 = site.expected_water?.volume_m3;
+  return m3 != null ? `#${site.rank} · ${num(m3)} m³` : `#${site.rank}`;
+}
+
+/** Where to put a label inside a catchment: the area-weighted centroid of its
+ *  largest ring. Good enough for the blob-like shapes catchments are; a
+ *  crescent would put it just outside, which still reads unambiguously. */
+function labelPoint(geometry: GeoJSON.Geometry): [number, number] | null {
+  const rings: GeoJSON.Position[][] = [];
+  if (geometry.type === "Polygon" && geometry.coordinates[0]) {
+    rings.push(geometry.coordinates[0]);
+  } else if (geometry.type === "MultiPolygon") {
+    for (const poly of geometry.coordinates) if (poly[0]) rings.push(poly[0]);
+  }
+  let best: { a: number; x: number; y: number } | null = null;
+  for (const ring of rings) {
+    let a = 0;
+    let cx = 0;
+    let cy = 0;
+    for (let i = 0; i < ring.length - 1; i++) {
+      const [x0 = 0, y0 = 0] = ring[i] ?? [];
+      const [x1 = 0, y1 = 0] = ring[i + 1] ?? [];
+      const cross = x0 * y1 - x1 * y0;
+      a += cross;
+      cx += (x0 + x1) * cross;
+      cy += (y0 + y1) * cross;
+    }
+    if (a === 0) continue;
+    const entry = { a: Math.abs(a), x: cx / (3 * a), y: cy / (3 * a) };
+    if (!best || entry.a > best.a) best = entry;
+  }
+  return best ? [best.x, best.y] : null;
+}
+
+/** Padding that keeps a framed area clear of what floats over the map: the
+ *  legend down the left, the zoom buttons top right, the title block bottom
+ *  right. Measured, because the legend collapses and its width is the user's
+ *  choice -- a fixed 56 px framed the recommended site underneath it. */
+function framePadding(mapEl: HTMLElement | null): maplibregl.PaddingOptions {
+  const padding = { top: 56, right: 64, bottom: 76, left: 56 };
+  const box = mapEl?.getBoundingClientRect();
+  const legend = mapEl?.parentElement
+    ?.querySelector(".legendbox:not(.is-collapsed)")
+    ?.getBoundingClientRect();
+  if (box && legend && legend.width > 0) {
+    // Never more than half the map: on a narrow screen the area still gets room.
+    padding.left = Math.min(Math.max(padding.left, legend.right - box.left + 28), box.width * 0.5);
+  }
+  return padding;
+}
+
+/** The popup for one site: the three results the brief asks for, in one place.
+ *  Built as DOM with `textContent`, so nothing in a response is ever parsed as
+ *  markup. */
+function sitePopup(site: CandidateSite): HTMLElement {
+  const root = document.createElement("div");
+  const title = document.createElement("div");
+  title.className = "sp-title";
+  title.textContent = `Site #${site.rank} · ${num(site.suitability_score, 1)}/100`;
+  root.append(title);
+
+  const rows: [string, string, string?][] = [];
+  const { lat, lon } = site.location;
+  rows.push(["Pond location", `${lat.toFixed(5)}, ${lon.toFixed(5)}`, "latitude, longitude"]);
+  const m = site.catchment.metrics;
+  rows.push(["Catchment", `${num(m.area_ha, 1)} ha`, `${num(m.area_km2, 2)} km² drains here`]);
+  const water = site.expected_water;
+  if (water?.volume_m3 != null) {
+    rows.push([
+      "Collects",
+      `${num(water.volume_m3)} m³ a year`,
+      water.limited_by === "inflow"
+        ? "limited by the inflow in a dry year"
+        : "limited by the pond's live storage",
+    ]);
+  } else {
+    rows.push(["Collects", "—", water?.basis ?? "no pond was sized here"]);
+  }
+  const inflow = water?.annual_inflow_m3;
+  if (inflow?.mean != null && inflow.dependable_75_percent != null) {
+    rows.push([
+      "Inflow",
+      `${num(inflow.mean)} m³ mean`,
+      `${num(inflow.dependable_75_percent)} m³ in three years of four`,
+    ]);
+  } else {
+    rows.push(["Inflow", "—", "rainfall unavailable on this run"]);
+  }
+
+  const table = document.createElement("dl");
+  for (const [label, value, note] of rows) {
+    const dt = document.createElement("dt");
+    dt.textContent = label;
+    const dd = document.createElement("dd");
+    dd.textContent = value;
+    if (note) {
+      const small = document.createElement("small");
+      small.textContent = note;
+      dd.append(small);
+    }
+    table.append(dt, dd);
+  }
+  root.append(table);
+  return root;
+}
+
 export function MapView({
   analysis,
   visibility,
@@ -273,6 +404,11 @@ export function MapView({
   parcels,
   onDelineate,
   onSelectSite,
+  drawing,
+  drawnArea,
+  onAreaDrawn,
+  onDrawCancel,
+  frameAreaKey,
 }: Props) {
   const container = useRef<HTMLDivElement | null>(null);
   const map = useRef<MapLibreMap | null>(null);
@@ -282,9 +418,22 @@ export function MapView({
   const onExplore = useRef(onDelineate);
   onExplore.current = onDelineate;
   const rankMarkers = useRef<maplibregl.Marker[]>([]);
-  //: Which tile URL each terrain layer currently points at, so a changed
-  //: analysis replaces the layer instead of showing the previous DEM's tiles.
-  const terrainUrls = useRef<Map<string, string>>(new Map());
+  const catchmentLabel = useRef<maplibregl.Marker | null>(null);
+  const popup = useRef<maplibregl.Popup | null>(null);
+  const readout = useRef<HTMLDivElement | null>(null);
+  // Layer handlers are registered once, on load; they read the current analysis
+  // and callbacks through refs rather than the values captured then.
+  const analysisRef = useRef(analysis);
+  analysisRef.current = analysis;
+  const onDrawn = useRef(onAreaDrawn);
+  onDrawn.current = onAreaDrawn;
+  const onCancelDraw = useRef(onDrawCancel);
+  onCancelDraw.current = onDrawCancel;
+  const drawnRef = useRef(drawnArea);
+  drawnRef.current = drawnArea;
+  const [mapReady, setMapReady] = useState(false);
+  const visibilityRef = useRef(visibility);
+  visibilityRef.current = visibility;
   // The map is created once; the initial basemap must not re-run that effect.
   const initialBasemap = useRef(basemap);
 
@@ -330,6 +479,7 @@ export function MapView({
       instance.addSource("explored-outlet", { type: "geojson", data: EMPTY });
       instance.addSource("parcels", { type: "geojson", data: EMPTY });
       instance.addSource("pond", { type: "geojson", data: EMPTY });
+      instance.addSource("drawn-area", { type: "geojson", data: EMPTY });
 
       instance.addLayer({
         id: "village-fill",
@@ -465,6 +615,27 @@ export function MapView({
         source: "catchment",
         paint: { "line-color": "#22d3ee", "line-width": 2 },
       });
+      // The selected area: white with a dark casing, the convention for "your
+      // selection", legible over both the photo and the street map. Above the
+      // catchment so it is never lost inside one, below the sites.
+      instance.addLayer({
+        id: "drawn-area-fill",
+        type: "fill",
+        source: "drawn-area",
+        paint: { "fill-color": "#ffffff", "fill-opacity": 0.06 },
+      });
+      instance.addLayer({
+        id: "drawn-area-casing",
+        type: "line",
+        source: "drawn-area",
+        paint: { "line-color": "#0f1720", "line-width": 4, "line-opacity": 0.55 },
+      });
+      instance.addLayer({
+        id: "drawn-area-line",
+        type: "line",
+        source: "drawn-area",
+        paint: { "line-color": "#ffffff", "line-width": 2 },
+      });
       instance.addLayer({
         id: "pond-fill",
         type: "fill",
@@ -528,7 +699,10 @@ export function MapView({
 
       instance.on("click", "site-point", (event) => {
         const rank = event.features?.[0]?.properties?.["rank"];
-        if (typeof rank === "number") onSelect.current(rank);
+        if (typeof rank !== "number") return;
+        onSelect.current(rank);
+        const site = analysisRef.current?.candidate_sites.find((s) => s.rank === rank);
+        if (site) openPopup(instance, site);
       });
       for (const id of ["site-point", "site-halo"]) {
         instance.on("mouseenter", id, () => {
@@ -539,16 +713,120 @@ export function MapView({
         });
       }
       ready.current = true;
+      setMapReady(true);
+      // Something a test (or a person inspecting the page) can wait on: the
+      // canvas exists well before the map will accept overlays or drags.
+      container.current?.setAttribute("data-ready", "true");
     });
+
+    // The live size of the rectangle being drawn, beside the cursor. DOM rather
+    // than React state: it changes on every pointer move, and re-rendering the
+    // workspace sixty times a second to move one label would be the wrong trade.
+    const label = document.createElement("div");
+    label.className = "draw-readout";
+    label.hidden = true;
+    container.current.append(label);
+    readout.current = label;
 
     map.current = instance;
     return () => {
       instance.remove();
+      label.remove();
       rankMarkers.current = [];
+      catchmentLabel.current = null;
+      popup.current = null;
       map.current = null;
       ready.current = false;
     };
   }, []);
+
+  function openPopup(instance: MapLibreMap, site: CandidateSite) {
+    popup.current?.remove();
+    popup.current = new maplibregl.Popup({
+      className: "site-popup",
+      offset: 16,
+      maxWidth: "290px",
+      focusAfterOpen: false,
+    })
+      .setLngLat([site.location.lon, site.location.lat])
+      .setDOMContent(sitePopup(site))
+      .addTo(instance);
+  }
+
+  // Draw mode: drags draw a rectangle; the live outline and its size follow the
+  // pointer; release hands the rectangle up. Escape restores what was there.
+  useEffect(() => {
+    const instance = map.current;
+    if (!instance || !mapReady || !drawing) return;
+    const source = () => instance.getSource("drawn-area") as maplibregl.GeoJSONSource | undefined;
+    const show = (bbox: Bbox | null) =>
+      source()?.setData(
+        bbox
+          ? { type: "FeatureCollection", features: [{ type: "Feature", geometry: bboxPolygon(bbox), properties: {} }] }
+          : EMPTY,
+      );
+    const label = readout.current;
+    const stop = startAreaDraw(instance, {
+      onChange: (bbox, at) => {
+        show(bbox);
+        if (!label) return;
+        const km2 = bboxAreaKm2(bbox);
+        const bad = km2 > AREA_MAX_KM2 || km2 < AREA_MIN_KM2;
+        label.hidden = false;
+        label.classList.toggle("is-bad", bad);
+        label.textContent =
+          km2 > AREA_MAX_KM2
+            ? `${num(km2, 1)} km² · over ${AREA_MAX_KM2} km²`
+            : km2 < AREA_MIN_KM2
+              ? `${num(km2, 3)} km² · under ${AREA_MIN_KM2} km²`
+              : `${num(km2, km2 < 10 ? 2 : 1)} km²`;
+        label.style.transform = `translate(${at.x + 14}px, ${at.y + 14}px)`;
+      },
+      onComplete: (bbox) => {
+        if (label) label.hidden = true;
+        onDrawn.current(bbox);
+      },
+      onCancel: () => {
+        if (label) label.hidden = true;
+        show(drawnRef.current);
+        onCancelDraw.current();
+      },
+    });
+    return () => {
+      stop();
+      if (label) label.hidden = true;
+    };
+  }, [drawing, mapReady]);
+
+  // The selected area, whenever it changes from outside a drag.
+  useEffect(() => {
+    const instance = map.current;
+    if (!instance || !mapReady) return;
+    const source = instance.getSource("drawn-area") as maplibregl.GeoJSONSource | undefined;
+    source?.setData(
+      drawnArea
+        ? {
+            type: "FeatureCollection",
+            features: [{ type: "Feature", geometry: bboxPolygon(drawnArea), properties: {} }],
+          }
+        : EMPTY,
+    );
+  }, [drawnArea, mapReady]);
+
+  // Frame the selected area when asked to -- not on every redraw, which would
+  // yank the view out from under someone adjusting their rectangle.
+  useEffect(() => {
+    const instance = map.current;
+    const area = drawnRef.current;
+    if (!instance || !mapReady || frameAreaKey === 0 || !area) return;
+    instance.fitBounds(
+      [
+        [area[0], area[1]],
+        [area[2], area[3]],
+      ],
+      { padding: framePadding(container.current), duration: 900 },
+    );
+  }, [frameAreaKey, mapReady]);
 
   // Push new analysis data onto the map, and frame it.
   useEffect(() => {
@@ -579,29 +857,41 @@ export function MapView({
     // which site is which behind the same network that the basemap needs --
     // and `terrain_only` exists precisely for when that network is absent.
     for (const marker of rankMarkers.current) marker.remove();
+    popup.current?.remove();
     rankMarkers.current = analysis.candidate_sites.map((site) => {
       const element = document.createElement("button");
       element.className = "site-rank";
       element.type = "button";
+      // The selected site's marker carries the water its pond collects (see the
+      // selection effect); every marker's tooltip and popup carry its own.
+      // Written on all five, the long labels collide on sites 200 m apart.
       element.textContent = `#${site.rank}`;
-      element.title = `Site #${site.rank} — ${site.suitability_score}/100`;
+      const m3 = site.expected_water?.volume_m3;
+      element.title =
+        `Site #${site.rank} — ${site.suitability_score}/100` +
+        (m3 != null ? ` · collects ${num(m3)} m³ a year` : "");
       element.addEventListener("click", (event) => {
         event.stopPropagation();
         onSelect.current(site.rank);
+        openPopup(instance, site);
       });
       return new maplibregl.Marker({ element, offset: [0, -20] })
         .setLngLat([site.location.lon, site.location.lat])
         .addTo(instance);
     });
 
-    const [w, s, e, n] = analysis.contour_map.bounds_4326;
-    instance.fitBounds(
-      [
-        [w, s],
-        [e, n],
-      ],
-      { padding: 56, duration: 900 },
+    // Framed on the area of interest, which both inputs carry -- the sheet's
+    // extent for an upload, the drawn rectangle for an area -- widened to take
+    // in the recommended catchment, which on a drawn area reaches into the
+    // margin beyond the rectangle.
+    const catchment = analysis.recommended_site?.catchment.geometry;
+    const extent = unionBounds(
+      boundsOf(analysis.area_of_interest),
+      catchment ? boundsOf(catchment) : null,
     );
+    if (extent) {
+      instance.fitBounds(extent, { padding: framePadding(container.current), duration: 900 });
+    }
   }, [analysis]);
 
   useEffect(() => {
@@ -614,10 +904,29 @@ export function MapView({
     // The drawn catchment belongs to one site; say which, on the map itself.
     const ranks = analysis?.candidate_sites ?? [];
     rankMarkers.current.forEach((marker, index) => {
-      const isSelected = ranks[index]?.rank === selectedRank;
-      marker.getElement().classList.toggle("site-rank--selected", isSelected);
-      marker.getElement().setAttribute("aria-pressed", String(isSelected));
+      const site = ranks[index];
+      const isSelected = site?.rank === selectedRank;
+      const element = marker.getElement();
+      element.classList.toggle("site-rank--selected", isSelected);
+      element.setAttribute("aria-pressed", String(isSelected));
+      if (site) element.textContent = isSelected ? siteLabel(site) : `#${site.rank}`;
+      // Above its neighbours, so the one label with a number is never covered.
+      element.style.zIndex = isSelected ? "2" : "";
     });
+
+    // The catchment's area, written inside it.
+    catchmentLabel.current?.remove();
+    catchmentLabel.current = null;
+    const chosen = analysis?.candidate_sites.find((s) => s.rank === selectedRank);
+    const at = chosen?.catchment.geometry ? labelPoint(chosen.catchment.geometry) : null;
+    if (chosen && at) {
+      const element = document.createElement("div");
+      element.className = "catchment-label";
+      const ha = chosen.catchment.metrics.area_ha;
+      element.textContent = `${num(ha, ha < 10 ? 1 : 0)} ha catchment`;
+      element.style.display = visibilityRef.current.catchment ? "" : "none";
+      catchmentLabel.current = new maplibregl.Marker({ element }).setLngLat(at).addTo(instance);
+    }
   }, [analysis, selectedRank]);
 
   useEffect(() => {
@@ -670,40 +979,32 @@ export function MapView({
     });
   }, [explored]);
 
-  // Terrain rasters, served as tiles by TiTiler.
+  // Slope and shaded relief: one image each, pinned to the grid's corners.
   //
-  // Added and removed rather than toggled, because the tile URL carries the
-  // content hash of the raster: a new analysis means a new URL, and a source
-  // cannot be repointed. Inserted before the first vector overlay so the
-  // shading sits under the contours and the catchment rather than over them.
+  // Images rather than TiTiler tiles, so the layers work on a deployment that
+  // runs nothing but the API -- with tiles they could be switched on and drew
+  // nothing there. A new run brings new URLs, and the existing source is
+  // repointed rather than rebuilt. Inserted below the first vector overlay so
+  // the shading sits under the contours and the catchment rather than over them.
   useEffect(() => {
     const instance = map.current;
     if (!instance || !ready.current) return;
 
     const wanted = new Map(terrain.map((layer) => [layer.product, layer]));
-
     for (const product of TERRAIN_PRODUCTS) {
       const id = `terrain-${product}`;
-      const existing = instance.getLayer(id);
       const layer = wanted.get(product);
-
-      const currentUrl = terrainUrls.current.get(product);
-      if (existing && (!layer || layer.tile_url_template !== currentUrl)) {
-        instance.removeLayer(id);
-        instance.removeSource(id);
-        terrainUrls.current.delete(product);
+      const source = instance.getSource(id) as maplibregl.ImageSource | undefined;
+      if (!layer) {
+        if (instance.getLayer(id)) instance.removeLayer(id);
+        if (source) instance.removeSource(id);
+        continue;
       }
-      if (!layer || instance.getLayer(id)) continue;
-
-      instance.addSource(id, {
-        type: "raster",
-        tiles: [layer.tile_url_template],
-        tileSize: layer.tile_size,
-        minzoom: layer.min_zoom,
-        maxzoom: layer.max_zoom,
-        bounds: layer.raster.bounds_4326,
-        attribution: "Terrain derived from the uploaded contour map",
-      });
+      if (source) {
+        source.updateImage({ url: layer.url, coordinates: layer.coordinates });
+        continue;
+      }
+      instance.addSource(id, { type: "image", url: layer.url, coordinates: layer.coordinates });
       instance.addLayer(
         {
           id,
@@ -713,12 +1014,13 @@ export function MapView({
             // Hillshade is a texture the imagery should still show through;
             // slope is a measurement and wants to be readable on its own.
             "raster-opacity": product === "hillshade" ? 0.55 : 0.7,
-            "raster-resampling": "linear",
+            // Nearest, not linear: at 30 m a cell is a real measurement, and
+            // smoothing between cells would draw detail that is not there.
+            "raster-resampling": "nearest",
           },
         },
         instance.getLayer("village-fill") ? "village-fill" : undefined,
       );
-      terrainUrls.current.set(product, layer.tile_url_template);
     }
   }, [terrain]);
 
@@ -834,6 +1136,11 @@ export function MapView({
     for (const marker of rankMarkers.current) {
       marker.getElement().style.display = visibility.sites ? "" : "none";
     }
+    for (const id of ["drawn-area-fill", "drawn-area-casing", "drawn-area-line"]) {
+      show(id, visibility.drawn);
+    }
+    const label = catchmentLabel.current?.getElement();
+    if (label) label.style.display = visibility.catchment ? "" : "none";
   }, [visibility, analysis, terrain]);
 
   return (

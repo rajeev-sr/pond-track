@@ -27,6 +27,7 @@ const KEY: Record<keyof LayerVisibility, { kind: "line" | "fill" | "dash"; colou
   parcels: { kind: "fill", colour: "var(--veg)" },
   village: { kind: "dash", colour: "var(--ink-2)" },
   aoi: { kind: "dash", colour: "var(--rule-2)" },
+  drawn: { kind: "line", colour: "var(--ink)" },
   hillshade: { kind: "fill", colour: "var(--ink-3)" },
   slope: { kind: "fill", colour: "var(--earth)" },
 };
@@ -42,6 +43,7 @@ const ORDER: (keyof LayerVisibility)[] = [
   "slope",
   "parcels",
   "village",
+  "drawn",
   "aoi",
 ];
 
@@ -49,13 +51,14 @@ const ORDER: (keyof LayerVisibility)[] = [
  *  end, and these are the four the reader can actually act on. */
 const WHY: Partial<Record<keyof LayerVisibility, string>> = {
   contours: "include contours on the run",
-  hillshade: "needs the tile service",
-  slope: "needs the tile service",
+  hillshade: "run an analysis",
+  slope: "run an analysis",
   parcels: "load available land",
   village: "search for a village",
   explored: "click the sheet",
   pond: "no design was sized",
   streams: "run an analysis",
+  drawn: "draw an area on the map",
 };
 
 export function LegendBox({
@@ -107,6 +110,15 @@ export function LegendBox({
                 )}
                 <span className="name">{t(`layers.${key}` as never)}</span>
               </label>
+              {/* The marker labels carry numbers; say what they are. */}
+              {key === "sites" && on && (
+                <div
+                  className="stamp"
+                  style={{ fontSize: 9.5, letterSpacing: ".08em", margin: "0 0 4px 29px" }}
+                >
+                  selected: rank · water collected a year
+                </div>
+              )}
               {!on && WHY[key] && (
                 <div
                   className="stamp"

@@ -14,7 +14,7 @@ export function Colophon() {
             <span className="stamp">Contour</span>
             <p style={{ maxWidth: "36ch", color: "var(--ink-2)", fontSize: 13.5 }}>
               Pond siting and catchment assessment for Indian villages, from the contour sheet a
-              Panchayat already has.
+              Panchayat already has, or from an area drawn on the map.
             </p>
           </div>
           <div>

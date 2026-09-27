@@ -10,15 +10,17 @@ import {
 
 import {
   ApiError,
+  analyzeAreaAsJob,
   analyzeContourAsJob,
   delineateCatchment,
-  fetchDerivatives,
+  fetchOverlays,
   fetchLandAvailability,
   fetchStreams,
   fetchVillageBoundary,
 } from "../api/client";
 import type {
   AnalyzeOptions,
+  Bbox,
   ContourAnalysis,
   DelineatedCatchment,
   JobStatus,
@@ -27,10 +29,14 @@ import type {
   StreamNetworkReport,
   StreamScope,
   StreamsResponse,
-  TerrainLayer,
+  TerrainOverlay,
   VillageMatch,
 } from "../api/types";
 import type { BasemapId, LayerVisibility, VillageOutline } from "../components/MapView";
+import { SAMPLE_AREA, roundBbox } from "../geo";
+
+/** The two ways into an analysis: a contour sheet, or a rectangle on the map. */
+export type InputMode = "upload" | "area";
 
 /**
  * All analysis state, lifted out of the workspace and into a provider.
@@ -73,6 +79,7 @@ const DEFAULT_LAYERS: LayerVisibility = {
   sites: true,
   aoi: true,
   village: true,
+  drawn: true,
 };
 
 export interface AnalysisState {
@@ -89,7 +96,8 @@ export interface AnalysisState {
   setSelectedRank: (r: number | null) => void;
   shownSites: number;
   setShownSites: (n: number) => void;
-  terrain: TerrainLayer[];
+  /** Slope and shaded relief as images, from GET /terrain/{dem_id}/overlays. */
+  terrain: TerrainOverlay[];
   streams: GeoJSON.FeatureCollection | null;
   streamSummary: StreamNetworkReport | null;
   streamScope: StreamScope;
@@ -113,6 +121,19 @@ export interface AnalysisState {
   clearError: () => void;
   analyse: (file: File) => void;
   cancel: () => void;
+  inputMode: InputMode;
+  setInputMode: (m: InputMode) => void;
+  /** The rectangle drawn on the map, whether or not it has been run yet. */
+  drawnArea: Bbox | null;
+  setDrawnArea: (b: Bbox | null) => void;
+  /** True while map drags draw a rectangle instead of panning. */
+  drawing: boolean;
+  setDrawing: (d: boolean) => void;
+  /** Bumped to ask the map to frame `drawnArea`. A counter rather than a flag
+   *  so asking twice frames twice. */
+  frameAreaKey: number;
+  pickSampleArea: () => void;
+  analyseArea: (bbox: Bbox) => void;
 }
 
 const Ctx = createContext<AnalysisState | null>(null);
@@ -136,7 +157,7 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
    *  found, which the terrain decides. */
   const [shownSites, setShownSites] = useState(0);
   const [basemap, setBasemap] = useState<BasemapId>("imagery");
-  const [terrain, setTerrain] = useState<TerrainLayer[]>([]);
+  const [terrain, setTerrain] = useState<TerrainOverlay[]>([]);
   const [streams, setStreams] = useState<GeoJSON.FeatureCollection | null>(null);
   const [streamSummary, setStreamSummary] = useState<StreamNetworkReport | null>(null);
   /** Which drainage network is drawn. `site` is the network above the recommended
@@ -161,6 +182,10 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
   const [jobStatus, setJobStatus] = useState<JobStatus | null>(null);
   const [error, setError] = useState<ApiError | Error | null>(null);
   const abort = useRef<AbortController | null>(null);
+  const [inputMode, setInputMode] = useState<InputMode>("upload");
+  const [drawnArea, setDrawnArea] = useState<Bbox | null>(null);
+  const [drawing, setDrawing] = useState(false);
+  const [frameAreaKey, setFrameAreaKey] = useState(0);
 
   /** Fetch (or reuse) one drainage network.
    *
@@ -208,8 +233,13 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
     [],
   );
 
-  const analyse = useCallback(
-    async (file: File) => {
+  /** One run, from either input. Everything after the result arrives -- the
+   *  drainage network, the terrain tiles, resetting what belonged to the last
+   *  run -- is the same whichever way the terrain came in. */
+  const run = useCallback(
+    async (
+      start: (onProgress: (s: JobStatus) => void, signal: AbortSignal) => Promise<ContourAnalysis>,
+    ) => {
       abort.current?.abort();
       const controller = new AbortController();
       abort.current = controller;
@@ -217,7 +247,7 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
       setError(null);
       setJobStatus(null);
       try {
-        const result = await analyzeContourAsJob(file, options, setJobStatus, controller.signal);
+        const result = await start(setJobStatus, controller.signal);
         setAnalysis(result);
         setShownSites(result.candidate_sites.length);
         setSelectedRank(result.recommended_site?.rank ?? null);
@@ -228,22 +258,17 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
         setExplored(null);
         setLand(null);
         if (result.dem_id) {
-          // Independent of the terrain tiles: the channels need no tile server,
-          // so a missing tiler must not cost them too.
+          // Independent of the terrain layers: neither needs the other, so a
+          // failure in one must not cost the second.
           streamCache.current = {};
           await loadStreams("site", result, controller.signal);
         }
         if (result.dem_id) {
           try {
-            const derived = await fetchDerivatives(
-              result.dem_id,
-              { products: "hillshade,slope", zFactor: 4 },
-              controller.signal,
-            );
-            setTerrain(derived.layers);
+            setTerrain(await fetchOverlays(result.dem_id, controller.signal));
           } catch (err) {
             if ((err as Error).name !== "AbortError") {
-              console.warn("terrain tiles unavailable", err);
+              console.warn("terrain layers unavailable", err);
             }
           }
         }
@@ -258,7 +283,23 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
         setBusy(false);
       }
     },
-    [options, loadStreams],
+    [loadStreams],
+  );
+
+  const analyse = useCallback(
+    (file: File) =>
+      run((onProgress, signal) => analyzeContourAsJob(file, options, onProgress, signal)),
+    [run, options],
+  );
+
+  const analyseArea = useCallback(
+    (bbox: Bbox) => {
+      setDrawing(false);
+      return run((onProgress, signal) =>
+        analyzeAreaAsJob(roundBbox(bbox), options, onProgress, signal),
+      );
+    },
+    [run, options],
   );
 
   /** Trimmed in one place rather than in each consumer: `candidate_sites` is read
@@ -392,12 +433,31 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
         abort.current?.abort();
         setBusy(false);
       },
+      inputMode,
+      setInputMode: (mode) => {
+        setInputMode(mode);
+        // Leaving the area mode must hand map drags back to panning.
+        if (mode !== "area") setDrawing(false);
+      },
+      drawnArea,
+      setDrawnArea,
+      drawing,
+      setDrawing,
+      frameAreaKey,
+      pickSampleArea: () => {
+        setInputMode("area");
+        setDrawing(false);
+        setDrawnArea(SAMPLE_AREA);
+        setFrameAreaKey((k) => k + 1);
+      },
+      analyseArea: (bbox) => void analyseArea(bbox),
     }),
     [
       analysis, shownAnalysis, options, layers, basemap, selectedRank, shownSites,
       terrain, streams, streamSummary, streamScope, loadingStreams, explored,
       exploring, land, loadingLand, village, villageNote, busy, jobStatus, error,
       analyse, explore, loadLand, loadStreams, selectVillage,
+      inputMode, drawnArea, drawing, frameAreaKey, analyseArea,
     ],
   );
 
