@@ -430,7 +430,7 @@ on their own at 21.8 s without a request lost. Details: [docs/SUBMISSION_PLAN.md
 ```bash
 make venv          # local virtualenv for the test suite
 make screen        # measure candidate test villages against the siting criteria
-make test          # 1,478 tests, offline, ~4 min
+make test          # 1,483 tests, offline, ~4 min
 make lint          # ruff + black
 make typecheck     # mypy on the domain layer
 make ui-check      # tsc --noEmit on the frontend

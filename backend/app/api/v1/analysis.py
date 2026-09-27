@@ -19,7 +19,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated, Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Response, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Header, Response, UploadFile, status
 
 from app.api.v1.contour import (
     _options_form,
@@ -34,6 +34,7 @@ from app.core.errors import NotFoundProblem, UnanswerableProblem
 from app.core.logging import get_logger
 from app.schemas.contour import AnalyzeAreaRequest
 from app.services import area as area_service
+from app.services import idempotency
 from app.services.contour_analysis import ContourAnalysisOptions
 from app.services.job_store import get_store
 from app.services.jobs import TERMINAL_STATES
@@ -78,8 +79,15 @@ async def start_analysis(
     file: Annotated[
         UploadFile | None, File(description="Accepted alias for `contour_map`.")
     ] = None,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ) -> Any:
     from app.api.v1.contour import _one_upload
+
+    repeated = idempotency.recall(idempotency_key)
+    if repeated is not None:
+        # A retried start whose first attempt did arrive: the same job, not a second.
+        response.headers["Location"] = repeated["status_url"]
+        return repeated
 
     data, filename = await _read_upload(_one_upload(contour_map, file))
     refuse_when_queue_full()
@@ -130,7 +138,7 @@ async def start_analysis(
         filename=_safe_filename(filename),
         executor="celery" if dispatched_to_worker else "in_process",
     )
-    return {
+    body = {
         "job_id": job_id,
         "state": "queued",
         "status_url": status_url,
@@ -139,6 +147,8 @@ async def start_analysis(
         "estimated_duration_s": 25,
         "poll_after_s": 1,
     }
+    idempotency.remember(idempotency_key, body)
+    return body
 
 
 @router.post(
@@ -159,7 +169,12 @@ async def start_area_analysis(
     background: BackgroundTasks,
     response: Response,
     request: AnalyzeAreaRequest,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ) -> Any:
+    repeated = idempotency.recall(idempotency_key)
+    if repeated is not None:
+        response.headers["Location"] = repeated["status_url"]
+        return repeated
     try:
         area_service.validate_bbox(request.bbox, max_km2=float(get_settings().MAX_AOI_KM2))
     except area_service.AreaError as exc:
@@ -194,7 +209,7 @@ async def start_area_analysis(
     status_url = f"/api/v1/analysis/{job_id}/status"
     response.headers["Location"] = status_url
     log.info("area analysis job accepted", job_id=job_id, bbox=request.bbox)
-    return {
+    body = {
         "job_id": job_id,
         "state": "queued",
         "status_url": status_url,
@@ -203,6 +218,8 @@ async def start_area_analysis(
         "estimated_duration_s": 20,
         "poll_after_s": 1,
     }
+    idempotency.remember(idempotency_key, body)
+    return body
 
 
 def _record_or_404(job_id: str) -> Any:

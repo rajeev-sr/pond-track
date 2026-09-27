@@ -1047,6 +1047,22 @@ or `413` at once rather than a job that fails a minute later. Its progress repor
 a `terrain` step — fetching Copernicus — where a contour job reports `parse` and
 `interpolate`; everything after is the same pipeline.
 
+**Sending a start twice is safe with `Idempotency-Key`.** Both job routes accept an
+optional `Idempotency-Key` header (8–64 letters, digits, `-` or `_`). A start whose
+key was seen on the same instance in the last ten minutes gets the original `202`
+back, same `job_id`, instead of a second job; a missing or malformed key is simply
+ignored. The web page sends one per Run and retries a start that gets no answer
+within 20 s: from the campus Wi-Fi about half of all new connections to the lab
+address hang, and the retry cannot know whether the first attempt arrived.
+
+```bash
+for n in 1 2; do
+  curl -s -X POST http://localhost:8000/api/v1/analysis/area \
+    -H 'Content-Type: application/json' -H 'Idempotency-Key: run-4f2a9c1e7b' \
+    -d '{"bbox": [81.2814, 21.2398, 81.3126, 21.2636]}' | jq -r .job_id
+done   # the same id twice
+```
+
 ### `GET /analysis/{job_id}/status`
 
 ```bash

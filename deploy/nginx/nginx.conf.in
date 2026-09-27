@@ -17,7 +17,11 @@ http {
     uwsgi_temp_path @RUN_DIR@/tmp/uwsgi;
     scgi_temp_path @RUN_DIR@/tmp/scgi;
     sendfile on;
-    keepalive_timeout 30s;
+    # Long enough that the page's check every 25 s keeps its connection open: on
+    # the campus network new connections are the ones that stall, and at 30 s a
+    # short pause before Run meant opening one.
+    keepalive_timeout 120s;
+    keepalive_requests 10000;
 
     include @RUN_DIR@/gateway.conf;
 }
