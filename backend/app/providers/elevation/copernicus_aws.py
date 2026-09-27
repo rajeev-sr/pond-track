@@ -17,8 +17,10 @@ that proved unobtainable. Same data, fewer preconditions.
 
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -51,6 +53,12 @@ MAX_GRID_CELLS = 20_000_000
 DEFAULT_BUFFER_M = 500.0
 
 
+class NoTerrainError(ProviderUnavailableError):
+    """Copernicus holds no elevation for the area: open sea, where the bucket has
+    no tile at all. Not an outage -- retrying will not help -- so callers answer
+    it as unanswerable (422) rather than unavailable (503)."""
+
+
 @dataclass(frozen=True)
 class CopernicusDemSource:
     """An `ElevationSource` backed by the Copernicus GLO-30 bucket."""
@@ -74,6 +82,20 @@ def tile_name(lat: float, lon: float) -> str:
 
 def tile_url(name: str) -> str:
     return f"{BUCKET}/{name}/{name}.tif"
+
+
+def tile_source(name: str) -> str:
+    """Where to read a tile from: a local copy when one is kept, else the bucket.
+
+    The lab systems' internet is unreliable -- S3 answers one minute and times
+    out the next -- so the tiles covering the demonstration region are kept on
+    disk at `COG_STORE_PATH/copernicus/<name>.tif`. A drawn area inside them
+    then needs no network at all; anywhere else still reads the public bucket.
+    """
+    from app.config import get_settings
+
+    local = Path(get_settings().COG_STORE_PATH) / "copernicus" / f"{name}.tif"
+    return str(local) if local.is_file() else tile_url(name)
 
 
 def tiles_covering(bounds: Bounds) -> list[str]:
@@ -142,15 +164,32 @@ def fetch_dem(
     transform = (cell, 0.0, min_x - cell / 2.0, 0.0, -cell, max_y + cell / 2.0)
     dst = np.full((n_rows, n_cols), np.nan, dtype=np.float32)
 
-    names = tiles_covering(b)
+    # The grid overhangs `b` by up to a cell and a half on every side -- the
+    # cell-centred origin plus the rounding up -- so the source is read two cells
+    # wider. Read at exactly `b`, that rim came back empty and a complete tile
+    # reported 96.8 % coverage.
+    margin_lon, margin_lat = 2.0 * cell * deg_per_m_lon, 2.0 * cell * deg_per_m_lat
+    read = Bounds(
+        b.min_lon - margin_lon,
+        b.min_lat - margin_lat,
+        b.max_lon + margin_lon,
+        b.max_lat + margin_lat,
+    )
+
+    names = tiles_covering(read)
     used: list[str] = []
     errors: list[str] = []
+    # Tiles that do not exist (the bucket has none over open sea) or hold nothing
+    # in this window. If that is every tile, there is no terrain here to analyse,
+    # which is a different answer from "the bucket could not be reached".
+    absent: list[str] = []
     for name in names:
         try:
-            with rasterio.open(tile_url(name)) as src:
-                window = from_bounds(*b.as_tuple(), src.transform)
+            with rasterio.open(tile_source(name)) as src:
+                window = from_bounds(*read.as_tuple(), src.transform)
                 block = src.read(1, window=window, boundless=True, fill_value=np.nan)
                 if block.size == 0 or not np.isfinite(block).any():
+                    absent.append(name)
                     continue
                 out = np.full((n_rows, n_cols), np.nan, dtype=np.float32)
                 reproject(
@@ -167,16 +206,22 @@ def fetch_dem(
                 dst = np.where(np.isnan(dst), out, dst)
                 used.append(name)
         except Exception as exc:
+            if "404" in str(exc):
+                absent.append(name)
             errors.append(f"{name}: {type(exc).__name__}")
 
     if not used:
+        if names and len(absent) == len(names):
+            raise NoTerrainError(
+                PROVIDER, "Copernicus has no land elevation here; the area lies over open water"
+            )
         raise ProviderUnavailableError(
             PROVIDER,
             f"no COP-DEM tile could be read for this area (tried {len(names)})"
             + (f": {'; '.join(errors)}" if errors else ""),
         )
     if not np.isfinite(dst).any():
-        raise ProviderUnavailableError(PROVIDER, "tiles read but contained no elevation")
+        raise NoTerrainError(PROVIDER, "the tiles covering this area hold no elevation")
 
     finite = dst[np.isfinite(dst)]
     return DemGrid(
@@ -206,11 +251,93 @@ def fetch_dem(
     )
 
 
+#: Bumped when the cached grid's meaning changes (resampling, buffering), so an
+#: old entry is refetched rather than served under the new rules.
+DEM_CACHE_VERSION = 1
+
+
+def _dem_cache_path(
+    store: Path, bounds: Bounds, cell_size_m: float | None, buffer_m: float
+) -> Path:
+    import hashlib
+
+    rounded = ",".join(f"{v:.5f}" for v in bounds.as_tuple())
+    key = hashlib.sha256(
+        f"v{DEM_CACHE_VERSION}|{rounded}|{cell_size_m}|{buffer_m:g}".encode()
+    ).hexdigest()
+    return store / "dem" / key[:2] / f"{key}.npz"
+
+
+def cached_fetch_dem(
+    bounds: Bounds,
+    *,
+    store: Path | None,
+    cell_size_m: float | None = None,
+    buffer_m: float = DEFAULT_BUFFER_M,
+    fetch: Any = None,
+) -> tuple[DemGrid, bool]:
+    """`fetch_dem` behind a disk cache: `(grid, was_cached)`.
+
+    A drawn area is re-analysed far more often than it is drawn — a second run with
+    different weights, a reload, a colleague opening the same village — and each
+    uncached run re-reads Copernicus from S3. The grid is small (a 100 km² box at
+    30 m is ~135 000 cells, about half a megabyte compressed), so keeping it costs
+    little. Rounded to five decimals (about a metre) so a box redrawn to within a
+    metre shares the entry.
+
+    Never raises for a cache problem: an unreadable or unwritable entry means a
+    fetch, not a failed analysis. `fetch` is injectable so the tests never touch S3.
+    """
+    fetcher = fetch if fetch is not None else fetch_dem
+    if store is None:
+        return fetcher(bounds, cell_size_m=cell_size_m, buffer_m=buffer_m), False
+
+    path = _dem_cache_path(store, bounds, cell_size_m, buffer_m)
+    if path.exists():
+        try:
+            with np.load(path, allow_pickle=False) as npz:
+                meta = json.loads(str(npz["meta"]))
+                return (
+                    DemGrid(
+                        elevation=np.asarray(npz["elevation"], dtype=np.float32),
+                        transform=tuple(float(v) for v in meta["transform"]),
+                        epsg=int(meta["epsg"]),
+                        cell_size_m=float(meta["cell_size_m"]),
+                        provenance={**meta.get("provenance", {}), "cache": "hit"},
+                    ),
+                    True,
+                )
+        except Exception:  # a corrupt entry is a miss, never a failure
+            pass
+
+    grid = fetcher(bounds, cell_size_m=cell_size_m, buffer_m=buffer_m)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        meta = {
+            "transform": list(grid.transform),
+            "epsg": grid.epsg,
+            "cell_size_m": grid.cell_size_m,
+            "provenance": grid.provenance,
+        }
+        tmp = path.with_name(path.name + ".tmp")
+        # A file handle rather than a name: given a name, numpy appends ".npz"
+        # to anything not already ending in it, and the atomic rename below would
+        # then look for a file that was never written.
+        with tmp.open("wb") as handle:
+            np.savez_compressed(
+                handle, elevation=grid.elevation, meta=json.dumps(meta, default=str)
+            )
+        tmp.replace(path)
+    except OSError:
+        pass
+    return grid, False
+
+
 def sample_elevation(lon: float, lat: float) -> float:
     """Elevation at one coordinate. Cheap sanity check, not for bulk use."""
     name = tile_name(lat, lon)
     try:
-        with rasterio.open(tile_url(name)) as src:
+        with rasterio.open(tile_source(name)) as src:
             value = next(iter(src.sample([(lon, lat)])))[0]
     except Exception as exc:
         raise ProviderUnavailableError(PROVIDER, f"{name}: {type(exc).__name__}") from exc

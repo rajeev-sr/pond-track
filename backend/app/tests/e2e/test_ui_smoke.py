@@ -119,7 +119,9 @@ class TestTheAppLoads:
     def test_every_layer_has_a_toggle(self, analysed):
         page, text, _ = analysed
         assert page.evaluate("document.querySelectorAll('input[type=checkbox]').length") >= 4
-        for layer in ("Contours", "Catchment", "Candidate sites", "Survey extent"):
+        # "Analysis extent", not "Survey extent": it is the drawn rectangle on an
+        # area run, which was never surveyed.
+        for layer in ("Contours", "Catchment", "Candidate sites", "Analysis extent"):
             assert layer in text
 
 
@@ -616,6 +618,7 @@ class TestClickToDelineate:
     @pytest.fixture(scope="class")
     def clicked(self, chrome_binary, frontend_url, sample_contour_map, cdp):
         import json as _json
+        import re as _re
         import time as _time
 
         with Chrome(chrome_binary) as page:
@@ -644,6 +647,18 @@ class TestClickToDelineate:
                     )
                 )
             )
+            # The map frames the sheet in the space right of the legend, not in
+            # the middle of the canvas (the recommended site used to sit under
+            # the legend). So the spots are fractions of that free space; as
+            # fractions of the whole canvas the third fell off the sheet's west
+            # edge and the API rightly answered 422.
+            legend_right = page.evaluate(
+                "document.querySelector('.legendbox:not(.is-collapsed)')"
+                "?.getBoundingClientRect().right ?? null"
+            )
+            if isinstance(legend_right, int | float):
+                free_left = min(legend_right - box["x"] + 28, box["w"] * 0.5)
+                box = {**box, "x": box["x"] + free_left, "w": box["w"] - free_left - 64}
 
             areas: list[str] = []
             for fraction_x, fraction_y in self.SPOTS:
@@ -677,11 +692,14 @@ class TestClickToDelineate:
                         )
                         or ""
                     )
+                    # A number and its unit, not any line containing "ha": the
+                    # standing hint ("...above that point") contains "ha" too, so
+                    # a click that failed still read as a catchment.
                     candidate = next(
                         (
                             line.strip()
                             for line in text.splitlines()
-                            if "ha" in line or "km²" in line
+                            if _re.search(r"\d[\d,.]*\s*(ha|km²)\b", line)
                         ),
                         "",
                     )

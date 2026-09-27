@@ -15,6 +15,8 @@ figure pass for the official one.
 from __future__ import annotations
 
 import datetime as dt
+import threading
+import time
 from typing import Any
 
 import numpy as np
@@ -55,6 +57,114 @@ DATA_CAVEAT = (
     "is the authoritative Indian record."
 )
 
+#: After Open-Meteo refuses -- HTTP 429, the free tier's per-address quota, which
+#: a campus address shares with everyone behind it -- or cannot be reached, it is
+#: not asked again for this long. From the lab network the refusal took up to 68 s
+#: to arrive, so asking on every analysis spent the enrichment budget waiting for
+#: an answer known in advance. An hour, because the quota that runs out is the
+#: daily one: asked every ten minutes, it cost one run in each window 18 s. The
+#: ensemble answers from NASA POWER meanwhile, and its `failures` say why.
+REFUSAL_TTL_S = 60 * 60
+
+_refusal_lock = threading.Lock()
+#: (time.monotonic() of the refusal, its reason), or None. Per process: each
+#: instance learns for itself, which costs one slow refusal each.
+_refusal: tuple[float, str] | None = None
+
+
+def _is_refusal(detail: str) -> bool:
+    """A rate limit or an unreachable service -- nothing to do with this request."""
+    return "HTTP 429" in detail or detail.startswith("request failed")
+
+
+def _remember_refusal(detail: str) -> None:
+    global _refusal
+    with _refusal_lock:
+        _refusal = (time.monotonic(), detail)
+
+
+#: Seconds allowed for the one-day probe asked before the thirty-year request,
+#: in a single attempt: from two of the lab systems the connection does not fail,
+#: it hangs, and with the usual three tries the probe outlasted the rainfall step.
+PROBE_TIMEOUT_S = 4.0
+
+
+def _probe(lon: float, lat: float) -> None:
+    """Ask for one day first, and remember a refusal before paying for thirty years.
+
+    Open-Meteo refuses a one-day request in about a second. Its refusal of the
+    full request took up to 68 s from the lab -- longer than the rainfall step
+    waits -- so it was learnt only after every analysis in between had waited
+    out the step's deadline for it.
+    """
+    day = dt.date(2020, 1, 1).isoformat()
+    try:
+        get_json(
+            PROVIDER,
+            BASE_URL,
+            params={
+                "latitude": lat,
+                "longitude": lon,
+                "start_date": day,
+                "end_date": day,
+                "daily": "precipitation_sum",
+            },
+            timeout=PROBE_TIMEOUT_S,
+            attempts=1,
+        )
+    except ProviderUnavailableError as exc:
+        if _is_refusal(exc.detail):
+            _remember_refusal(exc.detail)
+        raise
+
+
+#: The background re-probe, when one is running (a handle for tests to join).
+_reprobe: threading.Thread | None = None
+
+
+def _reprobe_in_background(lon: float, lat: float) -> None:
+    """Ask again off the request path, once the refusal is old.
+
+    Asked on a request, the probe could still cost that one run up to 20 s once
+    an hour on a lab system whose DNS stalls. Here nobody waits: runs go on
+    without Open-Meteo until the probe says it answers again.
+    """
+    global _reprobe
+
+    def run() -> None:
+        global _refusal
+        try:
+            _probe(lon, lat)
+        except ProviderUnavailableError as exc:
+            if _is_refusal(exc.detail):
+                return  # `_probe` has renewed the refusal
+        with _refusal_lock:
+            _refusal = None  # it answers (or the fault was the request's): ask it again
+
+    with _refusal_lock:
+        if _reprobe is not None and _reprobe.is_alive():
+            return
+        _reprobe = threading.Thread(target=run, name="open-meteo-reprobe", daemon=True)
+        _reprobe.start()
+
+
+def _raise_if_recently_refused(lon: float, lat: float) -> None:
+    with _refusal_lock:
+        refusal = _refusal
+    if refusal is None:
+        return
+    age = time.monotonic() - refusal[0]
+    if age < REFUSAL_TTL_S:
+        raise ProviderUnavailableError(
+            PROVIDER,
+            f"{refusal[1]} {age:.0f} s ago; asked again after {REFUSAL_TTL_S // 60} min "
+            "rather than on every run",
+        )
+    _reprobe_in_background(lon, lat)
+    raise ProviderUnavailableError(
+        PROVIDER, f"{refusal[1]} {age:.0f} s ago; being asked again in the background"
+    )
+
 
 def fetch_rainfall(lon: float, lat: float, years: int = DEFAULT_YEARS) -> RainfallStats:
     """Daily rainfall and ET0 for a coordinate, with design statistics."""
@@ -74,6 +184,8 @@ def fetch_rainfall(lon: float, lat: float, years: int = DEFAULT_YEARS) -> Rainfa
     )
     if cached is not None:
         return cached  # type: ignore[return-value]
+    _raise_if_recently_refused(lon, lat)
+    _probe(lon, lat)
 
     attempts: list[str] = []
     times: list[dt.date] = []
@@ -92,7 +204,12 @@ def fetch_rainfall(lon: float, lat: float, years: int = DEFAULT_YEARS) -> Rainfa
         }
         if model:
             params["models"] = model
-        payload = get_json(PROVIDER, BASE_URL, params=params, timeout=60.0)
+        try:
+            payload = get_json(PROVIDER, BASE_URL, params=params, timeout=60.0)
+        except ProviderUnavailableError as exc:
+            if _is_refusal(exc.detail):
+                _remember_refusal(exc.detail)
+            raise
         try:
             daily = payload["daily"]
             raw_times = daily["time"]

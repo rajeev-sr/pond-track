@@ -142,10 +142,17 @@ def get_json(
     url: str,
     params: QueryParams = None,
     timeout: float = DEFAULT_TIMEOUT_S,
+    *,
+    attempts: int = MAX_ATTEMPTS,
 ) -> Any:
-    """GET and parse JSON, translating every failure into `ProviderUnavailableError`."""
+    """GET and parse JSON, translating every failure into `ProviderUnavailableError`.
+
+    `attempts=1` for a probe, whose point is to learn quickly whether the service
+    answers at all: three timeouts in a row cost more than the question is worth.
+    """
+    fetch = _get if attempts == MAX_ATTEMPTS else _get.retry_with(stop=stop_after_attempt(attempts))
     try:
-        response = _get(url, params, timeout)
+        response = fetch(url, params, timeout)
     except Exception as exc:
         raise ProviderUnavailableError(provider, f"request failed: {type(exc).__name__}") from exc
     if response.status_code >= 400:

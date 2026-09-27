@@ -32,7 +32,7 @@ import logging
 import numpy as np
 
 from app.providers.base import Provenance, ProviderUnavailableError, get_json
-from app.providers.rainfall import cache
+from app.providers.rainfall import cache, et0
 from app.providers.rainfall.base import RainfallStats, build_stats
 
 log = logging.getLogger(__name__)
@@ -51,15 +51,18 @@ DATA_CAVEAT = (
     "NASA POWER at 0.5 x 0.625 degrees -- roughly 55 by 60 km, so one cell can "
     "span several districts. Held here as an independent cross-check on the "
     "finer ERA5-Land series and as the source of mean temperature; not a "
-    "substitute for either that or IMD's gauge-based grid."
+    "substitute for either that or IMD's gauge-based grid. Reference "
+    "evapotranspiration here is computed from POWER's daily maximum and minimum "
+    "temperature by the Hargreaves equation (FAO-56 eq. 52)."
 )
 
 #: POWER's sentinel for a missing value. Not null -- summing it silently gives a
 #: year with minus three hundred metres of rain.
 FILL_VALUE = -999.0
 
-#: Bias-corrected total precipitation, mm/day, and mean air temperature at 2 m.
-PARAMETERS = ("PRECTOTCORR", "T2M")
+#: Bias-corrected total precipitation, mm/day; mean, maximum and minimum air
+#: temperature at 2 m. The daily range is what Hargreaves ET0 needs (`et0.py`).
+PARAMETERS = ("PRECTOTCORR", "T2M", "T2M_MAX", "T2M_MIN")
 
 #: `community=AG` selects the agroclimatology parameter set, which is the one
 #: PRECTOTCORR and T2M belong to.
@@ -98,9 +101,20 @@ def fetch_rainfall(lon: float, lat: float, years: int = DEFAULT_YEARS) -> Rainfa
         data_caveat=DATA_CAVEAT,
         model_used="MERRA-2 (POWER daily, community=AG)",
     )
-    if cached is not None:
+    # A series cached before ET0 was computed here is fetched once more, so the
+    # water balance can run on it -- but if POWER is down, the cached rainfall is
+    # still far better than none.
+    if cached is not None and getattr(cached, "et0_monthly_mm", None) is not None:
         return cached  # type: ignore[return-value]
+    try:
+        return _fetch(lon, lat, start, end)
+    except ProviderUnavailableError:
+        if cached is not None:
+            return cached  # type: ignore[return-value]
+        raise
 
+
+def _fetch(lon: float, lat: float, start: dt.date, end: dt.date) -> RainfallStats:
     payload = get_json(
         PROVIDER,
         BASE_URL,
@@ -122,6 +136,9 @@ def fetch_rainfall(lon: float, lat: float, years: int = DEFAULT_YEARS) -> Rainfa
         temp_raw = series["T2M"]
     except (KeyError, TypeError) as exc:
         raise ProviderUnavailableError(PROVIDER, f"unexpected response: {exc}") from exc
+    # Optional: without them the series is still good rainfall, just no ET0.
+    tmax_raw = series.get("T2M_MAX") or {}
+    tmin_raw = series.get("T2M_MIN") or {}
 
     # The values are keyed by date rather than parallel to a time array, so the
     # series is built by sorting keys. A missing day is an absent key, not a hole
@@ -129,6 +146,8 @@ def fetch_rainfall(lon: float, lat: float, years: int = DEFAULT_YEARS) -> Rainfa
     dates: list[dt.date] = []
     precip: list[float] = []
     temps: list[float] = []
+    tmaxes: list[float] = []
+    tmins: list[float] = []
     filled = 0
 
     for key in sorted(precip_raw):
@@ -151,6 +170,10 @@ def fetch_rainfall(lon: float, lat: float, years: int = DEFAULT_YEARS) -> Rainfa
         # plausible-looking value that would halve Khosla's loss term for that
         # month, whereas NaN propagates visibly.
         temps.append(np.nan if temp <= FILL_VALUE + 1.0 else temp)
+        high = float(tmax_raw.get(key, FILL_VALUE))
+        low = float(tmin_raw.get(key, FILL_VALUE))
+        tmaxes.append(np.nan if high <= FILL_VALUE + 1.0 else high)
+        tmins.append(np.nan if low <= FILL_VALUE + 1.0 else low)
 
     if not dates:
         raise ProviderUnavailableError(PROVIDER, "the response contained no dated values")
@@ -173,6 +196,16 @@ def fetch_rainfall(lon: float, lat: float, years: int = DEFAULT_YEARS) -> Rainfa
     if missing_temp:
         warnings.append(f"{missing_temp} days had no temperature and were excluded from the means")
 
+    et0_series: np.ndarray | None = None
+    if tmax_raw and tmin_raw:
+        et0_series, gaps = et0.fill_by_month(
+            dates, et0.hargreaves(dates, np.array(tmaxes), np.array(tmins), lat)
+        )
+        if et0_series is None:
+            warnings.append("too few temperature records to compute reference evapotranspiration")
+        elif gaps:
+            warnings.append(f"{gaps} days had no temperature range; their ET0 is the month's mean")
+
     daily = np.array(precip)
     # Stored before the statistics are derived, so a series that turns out to
     # have too few complete years is still cached -- the next request for a
@@ -184,6 +217,7 @@ def fetch_rainfall(lon: float, lat: float, years: int = DEFAULT_YEARS) -> Rainfa
         dates=dates,
         precipitation_mm=daily,
         temperature_c=temp_array,
+        et0_mm=et0_series,
     )
 
     return build_stats(
@@ -195,8 +229,9 @@ def fetch_rainfall(lon: float, lat: float, years: int = DEFAULT_YEARS) -> Rainfa
         model_used="MERRA-2 (POWER daily, community=AG)",
         provenance=PROVENANCE,
         data_caveat=DATA_CAVEAT,
-        # POWER's AG set does not carry a reference-ET product in this request.
-        et0_daily_mm=None,
+        # Hargreaves from the daily temperature range (FAO-56 eq. 52), since the
+        # AG set carries no Penman-Monteith product.
+        et0_daily_mm=et0_series,
         temp_daily_c=temp_array,
         warnings=warnings,
     )

@@ -139,7 +139,11 @@ def _agreement_note(relative: float, lowest: float, highest: float, median: floa
 
 
 def fetch_ensemble(
-    lon: float, lat: float, years: int = open_meteo.DEFAULT_YEARS
+    lon: float,
+    lat: float,
+    years: int = open_meteo.DEFAULT_YEARS,
+    *,
+    budget_s: float = FETCH_BUDGET_S,
 ) -> RainfallEnsemble:
     """Fetch every rainfall source concurrently and report their agreement.
 
@@ -148,21 +152,29 @@ def fetch_ensemble(
     fails is recorded rather than raising: one reanalysis being down is a reason to
     report less confidence, not to refuse an answer.
 
+    Returns after `budget_s` with whichever sources have answered by then. The
+    caller's deadline is the one that matters, and it is shorter than a slow
+    source's HTTP timeout: from the lab network Open-Meteo takes ~70 s to send
+    its 429, while the cached POWER series is ready in 2 s.
+
     Raises only if *no* source answered, because then there is nothing to report.
     """
     members: dict[str, RainfallStats] = {}
     failures: list[dict[str, str]] = []
 
-    with ThreadPoolExecutor(max_workers=len(SOURCES)) as pool:
+    # Not a `with` block: leaving one joins every thread, so the slowest source
+    # would hold back the answer the others already gave.
+    pool = ThreadPoolExecutor(max_workers=len(SOURCES))
+    try:
         futures = {name: pool.submit(fetch, lon, lat, years) for name, fetch in SOURCES}
-        wait(list(futures.values()), timeout=FETCH_BUDGET_S)
+        wait(list(futures.values()), timeout=budget_s)
 
         for name, future in futures.items():
             if not future.done():
                 failures.append(
                     {
                         "source": name,
-                        "reason": f"did not answer within the {FETCH_BUDGET_S:g} s budget",
+                        "reason": f"did not answer within the {budget_s:g} s budget",
                     }
                 )
                 continue
@@ -173,6 +185,10 @@ def fetch_ensemble(
             except Exception as exc:  # a provider bug must not lose the other source
                 log.exception("rainfall_source_failed", extra={"source": name})
                 failures.append({"source": name, "reason": type(exc).__name__})
+    finally:
+        # A straggler ends on its own HTTP timeout. If it answers after all, its
+        # series is in the rainfall cache for the next request.
+        pool.shutdown(wait=False)
 
     if not members:
         raise ProviderUnavailableError(
