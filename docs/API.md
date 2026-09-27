@@ -10,20 +10,22 @@ page and reverse-proxies `/api/`, so `http://localhost:8080/docs` reaches these
 docs from a single origin. Its upload limit is pinned to the API's own 50 MB.
 
 All geometry is **GeoJSON in EPSG:4326**. Every measurement carries its unit in
-the field name (`area_ha`, `volume_m3`, `depth_m`, `rainfall_mm`, `cost_inr`).
+the field name (`area_ha`, `volume_m3`, `depth_m`, `rainfall_mm`, `relief_m`).
 
 ---
 
 ## `POST /analyzeContour`
 
 Upload a contour map; get pond sites, their catchments, runoff and pond designs.
-`POST /findCatchment` is an identical alias.
+`POST /findCatchment` is an identical alias. To analyse an area drawn on the map
+instead, with no file, see [`POST /analyzeArea`](#post-analyzearea).
 
-**Request** — `multipart/form-data`. Only `file` is required.
+**Request** — `multipart/form-data`. Only `contour_map` is required.
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
-| `file` | file | — | Contour map, `.kml` / `.kmz` (also accepts `.xml`) |
+| `contour_map` | file | — | **Required.** Contour map, `.kml` / `.kmz` (also accepts `.xml`) |
+| `file` | file | — | Accepted alias for `contour_map`. Send one, not both — both is a 400 |
 | `cell_size_m` | float 1–30 | *derived* | Interpolation grid resolution. Omit to derive it from mean contour spacing |
 | `max_sites` | int 1–25 | `5` | Maximum ranked sites |
 | `max_slope_pct` | float | `8.0` | Reject cells steeper than this |
@@ -41,7 +43,7 @@ Upload a contour map; get pond sites, their catchments, runoff and pond designs.
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/analyzeContour \
-  -F 'file=@contours_1m.kml' \
+  -F 'contour_map=@contours_1m.kml' \
   -F 'max_sites=3' \
   -o analysis.json
 ```
@@ -50,14 +52,14 @@ Terrain only, with no network access at all (~3 s):
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/analyzeContour \
-  -F 'file=@contours_1m.kml' -F 'enrich=false'
+  -F 'contour_map=@contours_1m.kml' -F 'enrich=false'
 ```
 
 Finer grid, geometry omitted for a compact response:
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/analyzeContour \
-  -F 'file=@contours_1m.kml' \
+  -F 'contour_map=@contours_1m.kml' \
   -F 'cell_size_m=3' \
   -F 'include_catchment_geometry=false'
 ```
@@ -136,6 +138,38 @@ pond
 `binding_constraint` is the actionable part. Values: `practical_excavation_depth`,
 `plan_area_geometry`, `sustainable_yield_share`, `water_table_clearance`,
 `budget`. On the sample, three candidates hit three different constraints.
+
+### `summary` — the three headline results
+
+Every analysis response, from a contour map or a drawn area, opens with the three
+results the brief asks for, for the recommended site:
+
+```json
+"summary": {
+  "available": true,
+  "site_rank": 1,
+  "suitability_score": 82.7,
+  "pond_location": {"lat": 21.25114, "lon": 81.29545},
+  "catchment_area_ha": 180.25,
+  "catchment_area_km2": 1.8025,
+  "expected_water_volume_m3": 73514.0,
+  "expected_water_volume_basis": "the pond's live storage, capped by the catchment's 75 % dependable annual inflow: the water it can collect in three years of four",
+  "expected_water_volume_limited_by": "storage",
+  "pond_capacity_m3": {"gross": 81682.0, "live": 73514.0},
+  "annual_inflow_m3": {"mean": 530632.0, "dependable_75_percent": 326365.0}
+}
+```
+
+`expected_water_volume_m3` is the smaller of the pond's live storage and the
+catchment's 75 % dependable inflow: storage the catchment cannot fill in a normal
+year is not collectable, and inflow beyond what the pond holds spills.
+`expected_water_volume_limited_by` says which one bound it. Inflow is never
+totalled across sites — catchments nest, so a sum would count the same water twice.
+When no site qualifies, `available` is `false` and the values are `null`.
+
+Every entry in `candidate_sites` carries the same figure for itself as
+`expected_water` — `volume_m3`, `limited_by`, `basis`, `pond_capacity_m3` and
+`annual_inflow_m3` — which is what the map labels each site marker with.
 
 ### The plain-language explanation (FR-14)
 
@@ -234,6 +268,56 @@ collects.
 
 ---
 
+## `POST /analyzeArea`
+
+Analyse a **rectangle drawn on the map**, with no file. Terrain is the Copernicus
+GLO-30 global elevation model at its native 30 m, fetched for the rectangle plus a
+500 m buffer. The response has **the same shape as `/analyzeContour`**, so every
+section above applies; `contour_map` is `null` and `terrain_source` says where the
+terrain came from.
+
+**Request** — `application/json`. Only `bbox` is required.
+
+| Field | Type | Default | Meaning |
+|---|---|---|---|
+| `bbox` | 4 numbers | — | **Required.** `[min_lon, min_lat, max_lon, max_lat]` in WGS84 degrees; 0.1–100 km² |
+| `max_sites` | int 1–25 | `5` | Maximum ranked sites |
+| `max_slope_pct` | float | `8.0` | Reject cells steeper than this |
+| `enrich` | bool | `true` | Fetch soil, land cover and rainfall for the area |
+| `include_contours` | bool | `false` | Return contours traced from the terrain, as GeoJSON |
+| `include_catchment_geometry` | bool | `true` | Include each catchment's GeoJSON polygon |
+
+```bash
+curl -X POST http://localhost:8000/api/v1/analyzeArea \
+  -H 'Content-Type: application/json' \
+  -d '{"bbox": [81.2814, 21.2398, 81.3126, 21.2636]}'
+```
+
+- **Sites are proposed only inside the rectangle.** The buffer is there so a
+  catchment that begins outside the line you drew is still measured whole.
+- `terrain_source` carries the dataset, resolution, the drawn and the analysed
+  bounds, the Copernicus tiles read, and whether the terrain came from the local
+  cache (fetched terrain is kept on disk, so redrawing the same area is fast).
+- The resolution is stated because it matters: at 30 m a 141 m pond spans about
+  five cells, where the sample contour sheet interpolates to 5 m.
+
+| Status | When |
+|---|---|
+| 400 | `bbox` not four numbers, inverted or zero-size, out of range, or below 0.1 km² |
+| 413 | Above the area cap (`MAX_AOI_KM2`, 100 km²); the response gives `area_km2` and `max_km2` |
+| 422 | No terrain exists there: the rectangle lies over open sea, where Copernicus has no tile |
+| 503 | Copernicus could not be reached; the detail names the tiles tried |
+
+The returned `dem_id` works with every follow-up route below, exactly as a
+contour upload's does.
+
+**How it compares with a contour upload.** Over the sample sheet's own extent,
+Copernicus agrees with the 5 m contour surface at r = 0.905 (relief 30.3 m against
+31.0 m, after a constant 5 m offset), but none of its candidates lies within 430 m
+of the upload's recommended site, and the catchments differ: each 30 m cell covers 36 times the ground. Use
+a drawn area to screen any village; upload a contour map where a survey exists.
+`scripts/compare_area_vs_contour.py` reproduces the comparison.
+
 ## `POST /terrain/contour-map`
 
 Parse and interpolate only — useful for checking what was read before committing
@@ -241,7 +325,7 @@ to a full analysis.
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/terrain/contour-map \
-  -F 'file=@contours_1m.kml'
+  -F 'contour_map=@contours_1m.kml'
 ```
 
 ```json
@@ -512,7 +596,7 @@ shipping that as JSON freezes the tab. As a COG the browser fetches only the
 
 ```bash
 DEM=$(curl -s -X POST localhost:8000/api/v1/analyzeContour \
-        -F 'file=@contours_1m.kml' -F 'enrich=false' | jq -r .dem_id)
+        -F 'contour_map=@contours_1m.kml' -F 'enrich=false' | jq -r .dem_id)
 curl -s -X POST localhost:8000/api/v1/terrain/derivatives \
      -F "dem_id=$DEM" -F 'hillshade_z_factor=4' | jq '.layers[].product'
 ```
@@ -543,6 +627,35 @@ flat colour. Hillshade gets no colormap: the band already *is* the grey value.
 **Slope is Horn's method**, the same function the siting model uses, on the
 **original** ground rather than the depression-filled surface — a filled hollow
 reads as 0 % slope exactly where a pond would go.
+
+## `GET /terrain/{dem_id}/overlays`
+
+Slope and shaded relief **without a tile server** — what the workspace draws. For
+each layer, the URL of one PNG and the four corners it belongs at (top-left,
+top-right, bottom-right, bottom-left, as MapLibre's image source takes them).
+The grid is at most a few hundred cells a side, so a single image is small, and
+nothing but the API has to be running.
+
+```bash
+curl -s localhost:8000/api/v1/terrain/$DEM/overlays | jq '.overlays[] | {product, url}'
+```
+
+```json
+{"product": "slope", "url": "/api/v1/terrain/3f1c…/overlay/slope",
+ "coordinates": [[81.2764, 21.2683], [81.3178, 21.2683], [81.3178, 21.2349], [81.2764, 21.2349]],
+ "legend": "Slope, percent (0-15 % shown; siting rejects above 8 %)",
+ "resolution_m": 30.0, "size_px": [143, 123]}
+```
+
+### `GET /terrain/{dem_id}/overlay/{product}`
+
+The image itself: `hillshade` in grey or `slope` in the magma ramp over the same
+fixed 0–15 % as the tiled layer, transparent where there is no terrain. Rendered
+once per `dem_id` and cached on disk.
+
+```bash
+curl -s -o slope.png localhost:8000/api/v1/terrain/$DEM/overlay/slope
+```
 
 ---
 
@@ -806,6 +919,11 @@ curl -sX POST http://localhost:8000/api/v1/land/available \
 }
 ```
 
+Land cover comes from the cache the analysis filled for this `dem_id`, and land
+cover and OpenStreetMap are fetched together under the same 20 s deadline an
+analysis gives them: a layer that misses it is named in `unavailable` and the
+parcels are computed without it, rather than the request outliving the gateway.
+
 `removed_by` is the reason this endpoint is worth reading rather than trusting.
 A parcel count on its own invites the assumption that terrain was the
 constraint; on the Durg sheet slope removes 49 % of cells at the HLD's 5 %
@@ -892,7 +1010,7 @@ which is what these are for (HLD 5.1: long operations answer `202`).
 
 ```bash
 curl -isX POST http://localhost:8000/api/v1/analysis \
-  -F file=@contours_1m.kml -F include_contours=true
+  -F contour_map=@contours_1m.kml -F include_contours=true
 ```
 
 ```json
@@ -912,6 +1030,22 @@ curl -isX POST http://localhost:8000/api/v1/analysis \
 local-only, and accepting a job into a queue nothing is draining would leave the
 client polling `queued` for ever, which is the one failure an async API must not
 have.
+
+### `POST /analysis/area`
+
+The job form of `POST /analyzeArea`, for a browser's progress bar. Same JSON body,
+same `202` answer as `POST /analysis`; poll the same status and result routes.
+
+```bash
+curl -isX POST http://localhost:8000/api/v1/analysis/area \
+  -H 'Content-Type: application/json' \
+  -d '{"bbox": [81.2814, 21.2398, 81.3126, 21.2636]}'
+```
+
+The rectangle is validated **before** the job is accepted, so a bad box is a `400`
+or `413` at once rather than a job that fails a minute later. Its progress reports
+a `terrain` step — fetching Copernicus — where a contour job reports `parse` and
+`interpolate`; everything after is the same pipeline.
 
 ### `GET /analysis/{job_id}/status`
 
@@ -1016,7 +1150,7 @@ Run an analysis with your own weights. `202` and a `job_id`, as
 
 ```bash
 curl -sX POST http://localhost:8000/api/v1/suitability/analyze \
-  -F file=@contours_1m.kml \
+  -F contour_map=@contours_1m.kml \
   -F 'weights_json={"weights":{"flow_accumulation":0.05,"slope":0.30,
        "depression_depth":0.25,"soil_runoff_potential":0.10,
        "land_availability":0.10,"distance_to_stream":0.05,
@@ -1185,7 +1319,31 @@ than failing at import and refusing to boot.
 `/health` never touches a backing service, so a container is not killed while
 waiting for its database. `/health/ready` probes PostGIS and Redis and lists
 which optional layers are configured; it returns `503` when a required
-dependency is down.
+dependency is down. Redis is optional: with `REDIS_URL` empty, as on the lab
+systems, a job is kept by the API process that runs it (the gateway sends each
+browser back to that process), and the check reads `not_configured` rather than
+`down`.
+
+### `GET /health/features`
+
+What this server can offer the page, always with `200` — a readiness probe that
+answers `503` is right for an orchestrator and wrong for a browser, which logs
+every `503` as an error. The workspace asks once per load and hides village
+search when there is no village register database — here, a server without
+one:
+
+```bash
+curl -s localhost:8000/api/v1/health/features
+```
+
+```json
+{"village_search": {"available": false, "reason": "no village register database"},
+ "analyses": {"limit": 1, "running": 0, "waiting": 0},
+ "max_area_km2": 100.0, "max_upload_mb": 50}
+```
+
+`analyses` is the overload guard's state: how many analyses this instance runs at
+once, how many are running, and how many jobs are waiting for a slot.
 
 ---
 

@@ -1,0 +1,68 @@
+{
+  "extent": [
+    81.2814044952393,
+    21.2398224433387,
+    81.3126468658447,
+    21.2635806472203
+  ],
+  "area_km2": 8.5302,
+  "contour": {
+    "grid": [
+      650,
+      527
+    ],
+    "cell_m": 5.0,
+    "elevation_m": [
+      267.0,
+      298.0
+    ],
+    "relief_m": 31.0,
+    "seconds": 3.9,
+    "recommended": {
+      "location": {
+        "lon": 81.2899514,
+        "lat": 21.2473513,
+        "projected_x_m": 530084.47,
+        "projected_y_m": 2349550.67,
+        "grid_row": 359,
+        "grid_col": 178
+      },
+      "score": 84.0,
+      "catchment_ha": 264.267
+    }
+  },
+  "drawn": {
+    "grid": [
+      143,
+      123
+    ],
+    "cell_m": 30.0,
+    "elevation_m": [
+      269.0,
+      299.1
+    ],
+    "relief_m": 30.1,
+    "seconds": 4.8,
+    "recommended": {
+      "location": {
+        "lon": 81.2962146,
+        "lat": 21.2507949,
+        "projected_x_m": 530733.61,
+        "projected_y_m": 2349933.0,
+        "grid_row": 64,
+        "grid_col": 68
+      },
+      "score": 67.5,
+      "catchment_ha": 270.09
+    },
+    "warm_seconds": 0.2
+  },
+  "agreement": {
+    "samples": 3327,
+    "bias_m": -5.023,
+    "spread_m": 2.269,
+    "mae_m": 5.058,
+    "correlation": 0.905
+  },
+  "nearest_to_contour_first_m": 432
+}

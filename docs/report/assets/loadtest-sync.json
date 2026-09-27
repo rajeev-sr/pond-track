@@ -1,0 +1,206 @@
+{
+  "base": "http://10.1.75.53:3274",
+  "mode": "sync",
+  "input": "area",
+  "enrich": true,
+  "levels": [
+    {
+      "summary": {
+        "scenario": "single",
+        "mode": "sync",
+        "users": 1,
+        "requests": 1,
+        "ok": 1,
+        "busy_503": 0,
+        "other_errors": 0,
+        "p50_s": 1.1,
+        "p95_s": 1.1,
+        "max_s": 1.1,
+        "follow_ups_ok": "1/1",
+        "instances_used": 1,
+        "wall_s": 1.2
+      },
+      "calls": [
+        {
+          "user": "f0ec4f698511496887c6e557",
+          "upstream": "172.17.0.75:4000",
+          "status": 200,
+          "seconds": 1.0576795684173703,
+          "follow_up": 200,
+          "detail": ""
+        }
+      ]
+    },
+    {
+      "summary": {
+        "scenario": "spread",
+        "mode": "sync",
+        "users": 3,
+        "requests": 3,
+        "ok": 3,
+        "busy_503": 0,
+        "other_errors": 0,
+        "p50_s": 1.0,
+        "p95_s": 1.2,
+        "max_s": 1.2,
+        "follow_ups_ok": "3/3",
+        "instances_used": 3,
+        "wall_s": 1.4
+      },
+      "calls": [
+        {
+          "user": "f0ec4f698511496887c6e557",
+          "upstream": "172.17.0.75:4000",
+          "status": 200,
+          "seconds": 0.9541832506656647,
+          "follow_up": 200,
+          "detail": ""
+        },
+        {
+          "user": "bc1d51cafa1c41be99ec6125",
+          "upstream": "172.17.0.76:4000",
+          "status": 200,
+          "seconds": 0.9780040765181184,
+          "follow_up": 200,
+          "detail": ""
+        },
+        {
+          "user": "8f404be57bd845f79c033594",
+          "upstream": "172.17.0.77:4000",
+          "status": 200,
+          "seconds": 1.1727951280772686,
+          "follow_up": 200,
+          "detail": ""
+        }
+      ]
+    },
+    {
+      "summary": {
+        "scenario": "doubled",
+        "mode": "sync",
+        "users": 6,
+        "requests": 6,
+        "ok": 3,
+        "busy_503": 3,
+        "other_errors": 0,
+        "p50_s": 1.0,
+        "p95_s": 1.1,
+        "max_s": 1.1,
+        "follow_ups_ok": "3/3",
+        "instances_used": 3,
+        "wall_s": 1.4
+      },
+      "calls": [
+        {
+          "user": "8540c9093b324e96bf6cfc1d",
+          "upstream": "172.17.0.77:4000",
+          "status": 503,
+          "seconds": 0.007950402796268463,
+          "follow_up": null,
+          "detail": "this server is already running 1 analysis, which is all its memory allows. Try again in about 15 s -- or start it as a j"
+        },
+        {
+          "user": "bc1d51cafa1c41be99ec6125",
+          "upstream": "172.17.0.76:4000",
+          "status": 503,
+          "seconds": 0.016122737899422646,
+          "follow_up": null,
+          "detail": "this server is already running 1 analysis, which is all its memory allows. Try again in about 15 s -- or start it as a j"
+        },
+        {
+          "user": "f0ec4f698511496887c6e557",
+          "upstream": "172.17.0.75:4000",
+          "status": 503,
+          "seconds": 0.01939168106764555,
+          "follow_up": null,
+          "detail": "this server is already running 1 analysis, which is all its memory allows. Try again in about 15 s -- or start it as a j"
+        },
+        {
+          "user": "26b8abffb78145678bd4967f",
+          "upstream": "172.17.0.75:4000",
+          "status": 200,
+          "seconds": 0.9930902756750584,
+          "follow_up": 200,
+          "detail": ""
+        },
+        {
+          "user": "4e1f391b063c49ea80c9351a",
+          "upstream": "172.17.0.76:4000",
+          "status": 200,
+          "seconds": 0.9823653604835272,
+          "follow_up": 200,
+          "detail": ""
+        },
+        {
+          "user": "8f404be57bd845f79c033594",
+          "upstream": "172.17.0.77:4000",
+          "status": 200,
+          "seconds": 1.0831341790035367,
+          "follow_up": 200,
+          "detail": ""
+        }
+      ]
+    },
+    {
+      "summary": {
+        "scenario": "collide",
+        "mode": "sync",
+        "users": 3,
+        "requests": 3,
+        "ok": 1,
+        "busy_503": 2,
+        "other_errors": 0,
+        "p50_s": 0.9,
+        "p95_s": 0.9,
+        "max_s": 0.9,
+        "follow_ups_ok": "1/1",
+        "instances_used": 1,
+        "wall_s": 1.1
+      },
+      "calls": [
+        {
+          "user": "26b8abffb78145678bd4967f",
+          "upstream": "172.17.0.75:4000",
+          "status": 503,
+          "seconds": 0.015119621530175209,
+          "follow_up": null,
+          "detail": "this server is already running 1 analysis, which is all its memory allows. Try again in about 15 s -- or start it as a j"
+        },
+        {
+          "user": "30a4ed61f3fd4c8b87c18059",
+          "upstream": "172.17.0.75:4000",
+          "status": 503,
+          "seconds": 0.013929354958236217,
+          "follow_up": null,
+          "detail": "this server is already running 1 analysis, which is all its memory allows. Try again in about 15 s -- or start it as a j"
+        },
+        {
+          "user": "f0ec4f698511496887c6e557",
+          "upstream": "172.17.0.75:4000",
+          "status": 200,
+          "seconds": 0.9162920461967587,
+          "follow_up": 200,
+          "detail": ""
+        }
+      ]
+    }
+  ],
+  "memory": {
+    "sys2": {
+      "peak_mb": 194,
+      "peak_cgroup_mb": 511,
+      "oom_kills": 0
+    },
+    "sys3": {
+      "peak_mb": 210,
+      "peak_cgroup_mb": 511,
+      "oom_kills": 0
+    },
+    "sys4": {
+      "peak_mb": 263,
+      "peak_cgroup_mb": 412,
+      "oom_kills": 0
+    }
+  },
+  "memory_basis": "anonymous (process) memory sampled once a second on each system during the run; oom_kills counts kills since sampling began"
+}

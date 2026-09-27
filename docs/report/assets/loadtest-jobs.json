@@ -1,0 +1,310 @@
+{
+  "base": "http://10.1.75.53:3274",
+  "mode": "jobs",
+  "input": "area",
+  "enrich": true,
+  "levels": [
+    {
+      "summary": {
+        "scenario": "single",
+        "mode": "jobs",
+        "users": 1,
+        "requests": 2,
+        "ok": 2,
+        "busy_503": 0,
+        "other_errors": 0,
+        "p50_s": 1.0,
+        "p95_s": 1.0,
+        "max_s": 1.0,
+        "follow_ups_ok": "2/2",
+        "instances_used": 1,
+        "wall_s": 2.6
+      },
+      "calls": [
+        {
+          "user": "9188ad0aefc34f5bb6f8c2eb",
+          "upstream": "172.17.0.75:4000",
+          "status": 200,
+          "seconds": 1.0417761150747538,
+          "follow_up": 200,
+          "detail": ""
+        },
+        {
+          "user": "9188ad0aefc34f5bb6f8c2eb",
+          "upstream": "172.17.0.75:4000",
+          "status": 200,
+          "seconds": 1.0423132181167603,
+          "follow_up": 200,
+          "detail": ""
+        }
+      ]
+    },
+    {
+      "summary": {
+        "scenario": "spread",
+        "mode": "jobs",
+        "users": 3,
+        "requests": 6,
+        "ok": 6,
+        "busy_503": 0,
+        "other_errors": 0,
+        "p50_s": 1.0,
+        "p95_s": 7.1,
+        "max_s": 7.1,
+        "follow_ups_ok": "6/6",
+        "instances_used": 3,
+        "wall_s": 8.7
+      },
+      "calls": [
+        {
+          "user": "9188ad0aefc34f5bb6f8c2eb",
+          "upstream": "172.17.0.75:4000",
+          "status": 200,
+          "seconds": 1.0398097708821297,
+          "follow_up": 200,
+          "detail": ""
+        },
+        {
+          "user": "f6c7d95837c64dc686bdd74d",
+          "upstream": "172.17.0.77:4000",
+          "status": 200,
+          "seconds": 1.1474122246727347,
+          "follow_up": 200,
+          "detail": ""
+        },
+        {
+          "user": "9188ad0aefc34f5bb6f8c2eb",
+          "upstream": "172.17.0.75:4000",
+          "status": 200,
+          "seconds": 1.0418350705876946,
+          "follow_up": 200,
+          "detail": ""
+        },
+        {
+          "user": "f6c7d95837c64dc686bdd74d",
+          "upstream": "172.17.0.77:4000",
+          "status": 200,
+          "seconds": 1.0431205239146948,
+          "follow_up": 200,
+          "detail": ""
+        },
+        {
+          "user": "68be7955679f4da2abd0e032",
+          "upstream": "172.17.0.76:4000",
+          "status": 200,
+          "seconds": 7.0933583956211805,
+          "follow_up": 200,
+          "detail": ""
+        },
+        {
+          "user": "68be7955679f4da2abd0e032",
+          "upstream": "172.17.0.76:4000",
+          "status": 200,
+          "seconds": 1.0414512753486633,
+          "follow_up": 200,
+          "detail": ""
+        }
+      ]
+    },
+    {
+      "summary": {
+        "scenario": "doubled",
+        "mode": "jobs",
+        "users": 6,
+        "requests": 12,
+        "ok": 12,
+        "busy_503": 0,
+        "other_errors": 0,
+        "p50_s": 3.1,
+        "p95_s": 3.1,
+        "max_s": 3.2,
+        "follow_ups_ok": "12/12",
+        "instances_used": 3,
+        "wall_s": 7.3
+      },
+      "calls": [
+        {
+          "user": "9188ad0aefc34f5bb6f8c2eb",
+          "upstream": "172.17.0.75:4000",
+          "status": 200,
+          "seconds": 1.068970987573266,
+          "follow_up": 200,
+          "detail": ""
+        },
+        {
+          "user": "68be7955679f4da2abd0e032",
+          "upstream": "172.17.0.76:4000",
+          "status": 200,
+          "seconds": 1.075101993046701,
+          "follow_up": 200,
+          "detail": ""
+        },
+        {
+          "user": "f6c7d95837c64dc686bdd74d",
+          "upstream": "172.17.0.77:4000",
+          "status": 200,
+          "seconds": 1.200856240466237,
+          "follow_up": 200,
+          "detail": ""
+        },
+        {
+          "user": "6636fb77024c4d5fbdc4a175",
+          "upstream": "172.17.0.75:4000",
+          "status": 200,
+          "seconds": 3.1022020494565368,
+          "follow_up": 200,
+          "detail": ""
+        },
+        {
+          "user": "ef520d9ebb23423189adae5d",
+          "upstream": "172.17.0.76:4000",
+          "status": 200,
+          "seconds": 3.0882035112008452,
+          "follow_up": 200,
+          "detail": ""
+        },
+        {
+          "user": "67211fe7337741fdb33bd429",
+          "upstream": "172.17.0.77:4000",
+          "status": 200,
+          "seconds": 3.205185739323497,
+          "follow_up": 200,
+          "detail": ""
+        },
+        {
+          "user": "9188ad0aefc34f5bb6f8c2eb",
+          "upstream": "172.17.0.75:4000",
+          "status": 200,
+          "seconds": 3.1406861590221524,
+          "follow_up": 200,
+          "detail": ""
+        },
+        {
+          "user": "68be7955679f4da2abd0e032",
+          "upstream": "172.17.0.76:4000",
+          "status": 200,
+          "seconds": 3.0950423991307616,
+          "follow_up": 200,
+          "detail": ""
+        },
+        {
+          "user": "f6c7d95837c64dc686bdd74d",
+          "upstream": "172.17.0.77:4000",
+          "status": 200,
+          "seconds": 3.06836602371186,
+          "follow_up": 200,
+          "detail": ""
+        },
+        {
+          "user": "6636fb77024c4d5fbdc4a175",
+          "upstream": "172.17.0.75:4000",
+          "status": 200,
+          "seconds": 2.1370791671797633,
+          "follow_up": 200,
+          "detail": ""
+        },
+        {
+          "user": "67211fe7337741fdb33bd429",
+          "upstream": "172.17.0.77:4000",
+          "status": 200,
+          "seconds": 2.24124419875443,
+          "follow_up": 200,
+          "detail": ""
+        },
+        {
+          "user": "ef520d9ebb23423189adae5d",
+          "upstream": "172.17.0.76:4000",
+          "status": 200,
+          "seconds": 3.1245780466124415,
+          "follow_up": 200,
+          "detail": ""
+        }
+      ]
+    },
+    {
+      "summary": {
+        "scenario": "collide",
+        "mode": "jobs",
+        "users": 3,
+        "requests": 6,
+        "ok": 6,
+        "busy_503": 0,
+        "other_errors": 0,
+        "p50_s": 3.6,
+        "p95_s": 4.2,
+        "max_s": 4.2,
+        "follow_ups_ok": "6/6",
+        "instances_used": 1,
+        "wall_s": 9.3
+      },
+      "calls": [
+        {
+          "user": "9188ad0aefc34f5bb6f8c2eb",
+          "upstream": "172.17.0.75:4000",
+          "status": 200,
+          "seconds": 1.0827879831194878,
+          "follow_up": 200,
+          "detail": ""
+        },
+        {
+          "user": "f053abfcb0744beeaa5f2410",
+          "upstream": "172.17.0.75:4000",
+          "status": 200,
+          "seconds": 3.109134530648589,
+          "follow_up": 200,
+          "detail": ""
+        },
+        {
+          "user": "6636fb77024c4d5fbdc4a175",
+          "upstream": "172.17.0.75:4000",
+          "status": 200,
+          "seconds": 4.142064373940229,
+          "follow_up": 200,
+          "detail": ""
+        },
+        {
+          "user": "9188ad0aefc34f5bb6f8c2eb",
+          "upstream": "172.17.0.75:4000",
+          "status": 200,
+          "seconds": 4.075097401626408,
+          "follow_up": 200,
+          "detail": ""
+        },
+        {
+          "user": "f053abfcb0744beeaa5f2410",
+          "upstream": "172.17.0.75:4000",
+          "status": 200,
+          "seconds": 3.2002794621512294,
+          "follow_up": 200,
+          "detail": ""
+        },
+        {
+          "user": "6636fb77024c4d5fbdc4a175",
+          "upstream": "172.17.0.75:4000",
+          "status": 200,
+          "seconds": 4.197155310772359,
+          "follow_up": 200,
+          "detail": ""
+        }
+      ]
+    }
+  ],
+  "memory": {
+    "sys2": {
+      "peak_mb": 194,
+      "peak_cgroup_mb": 511,
+      "oom_kills": 0
+    },
+    "sys3": {
+      "peak_mb": 211,
+      "peak_cgroup_mb": 511,
+      "oom_kills": 0
+    },
+    "sys4": {
+      "peak_mb": 277,
+      "peak_cgroup_mb": 421,
+      "oom_kills": 0
+    }
+  },
+  "memory_basis": "anonymous (process) memory sampled once a second on each system during the run; oom_kills counts kills since sampling began"
+}

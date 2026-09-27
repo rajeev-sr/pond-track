@@ -1,0 +1,23 @@
+{
+  "victim": "sys4",
+  "requests": 44,
+  "failed": 0,
+  "back_on_own_instance_s": 21.8,
+  "timeline": [
+    {
+      "t_s": 0.0,
+      "status": 200,
+      "served_by": "sys4"
+    },
+    {
+      "t_s": 1.5,
+      "status": 200,
+      "served_by": "sys3"
+    },
+    {
+      "t_s": 21.8,
+      "status": 200,
+      "served_by": "sys4"
+    }
+  ]
+}

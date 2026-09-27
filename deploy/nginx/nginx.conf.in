@@ -1,0 +1,23 @@
+# Top-level nginx config for running the gateway without root, on a lab system.
+# Rendered by deploy/render_gateway.py; every path is under @RUN_DIR@.
+
+worker_processes 1;
+pid @RUN_DIR@/nginx.pid;
+error_log @RUN_DIR@/logs/gateway.error.log warn;
+
+events {
+    worker_connections 512;
+}
+
+http {
+    access_log @RUN_DIR@/logs/gateway.access.log;
+    client_body_temp_path @RUN_DIR@/tmp/body;
+    proxy_temp_path @RUN_DIR@/tmp/proxy;
+    fastcgi_temp_path @RUN_DIR@/tmp/fastcgi;
+    uwsgi_temp_path @RUN_DIR@/tmp/uwsgi;
+    scgi_temp_path @RUN_DIR@/tmp/scgi;
+    sendfile on;
+    keepalive_timeout 30s;
+
+    include @RUN_DIR@/gateway.conf;
+}

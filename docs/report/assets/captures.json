@@ -1,0 +1,13 @@
+{
+  "analysis.json": "the stu79 deployment, http://10.1.75.53:3274, requested from inside the lab network (sys3) on 2026-09-27, after one warm-up run",
+  "area.json": "the stu79 deployment, http://10.1.75.53:3274, requested from inside the lab network (sys3) on 2026-09-27, after one warm-up run",
+  "compare-30m-5m.json": "scripts/compare_area_vs_contour.py on this machine, enrichment off on both sides",
+  "loadtest-jobs.json": "scripts/loadtest.py on stu79 sys3 against http://10.1.75.53:3274: three API instances of 512 MB and one CPU each behind the gateway; process memory sampled once a second on each system",
+  "loadtest-sync.json": "scripts/loadtest.py on the stu79 deployment, as above",
+  "loadtest-contour.json": "scripts/loadtest.py on the stu79 deployment, as above",
+  "failover.json": "scripts/failover_check.py on stu79 sys4, killing its own API process while a user pinned to it kept making requests through the gateway",
+  "openapi.json": "the stu79 deployment, http://10.1.75.53:3274, requested from inside the lab network (sys3) on 2026-09-27",
+  "ready.json": "the stu79 deployment, http://10.1.75.53:3274, requested from inside the lab network (sys3) on 2026-09-27",
+  "endpoints.json": "scripts/capture_endpoints.py on stu79 sys3 against http://10.1.75.53:3274, one browser id throughout",
+  "ui-*.jpg": "Chrome on the laptop against http://10.1.75.53:3274 on 2026-09-27 (ui-brief.jpg, not used as a figure, is older)"
+}

@@ -1,0 +1,70 @@
+# The four stu79 systems, emulated on one machine before touching the real ones.
+#
+#   python3 deploy/render_gateway.py --lab          # writes deploy/lab/gateway.conf
+#   (cd frontend && npm run build)                   # the UI every instance serves
+#   UID=$(id -u) GID=$(id -g) docker compose -f deploy/lab/compose.yml up -d
+#   python3 scripts/loadtest.py --base http://localhost:3273
+#
+# Each API instance gets what a lab system has -- 512 MB with no swap, one CPU --
+# and its own cache directory, because the real systems share no disk. The
+# gateway is the same nginx config the lab runs, rendered for these hostnames.
+# `restart: unless-stopped` stands in for deploy/supervise.sh.
+
+name: contour-lab
+
+x-api: &api
+  image: contour-api:latest
+  entrypoint: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000",
+               "--workers", "1", "--limit-concurrency", "64"]
+  working_dir: /work/contour/backend
+  user: "${UID:-1000}:${GID:-1000}"
+  mem_limit: 512m
+  memswap_limit: 512m
+  cpus: 1.0
+  restart: unless-stopped
+  volumes:
+    - ../..:/work/contour
+
+x-env: &env
+  PYTHONPATH: /work/contour/backend
+  PYTHONDONTWRITEBYTECODE: "1"
+  HOME: /tmp
+  FRONTEND_DIST: /work/contour/frontend/dist
+  MAX_CONCURRENT_ANALYSES: "1"
+  DEM_CACHE_LIMIT: "1"
+  # No database or Redis in the emulation: jobs live in each instance's memory,
+  # which is why the gateway's affinity matters. Port 1 fails instantly.
+  POSTGRES_HOST: 127.0.0.1
+  POSTGRES_PORT: "1"
+  REDIS_URL: redis://127.0.0.1:1/0
+  LOG_JSON: "false"
+  # Measured, not guessed: without these an instance kept ~390 MB after a few
+  # analyses (idle is ~165 MB), leaving no room under 512 MB for the next one.
+  # GDAL sizes its block cache from the *host's* RAM, not the container's
+  # limit; glibc gives each analysis thread its own malloc arena.
+  GDAL_CACHEMAX: "64"
+  MALLOC_ARENA_MAX: "2"
+
+services:
+  api-1:
+    <<: *api
+    environment: { <<: *env, COG_STORE_PATH: /work/contour/data/cache/lab/sys1 }
+  api-2:
+    <<: *api
+    environment: { <<: *env, COG_STORE_PATH: /work/contour/data/cache/lab/sys2 }
+  api-3:
+    <<: *api
+    environment: { <<: *env, COG_STORE_PATH: /work/contour/data/cache/lab/sys3 }
+  api-4:
+    <<: *api
+    environment: { <<: *env, COG_STORE_PATH: /work/contour/data/cache/lab/sys4 }
+
+  gateway:
+    # Only this image's nginx is used (it is nginx:1.27-alpine underneath); the
+    # config below replaces the one it ships with.
+    image: contour-frontend:latest
+    volumes:
+      - ./gateway.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "3273:80"
+    depends_on: [api-1, api-2, api-3, api-4]

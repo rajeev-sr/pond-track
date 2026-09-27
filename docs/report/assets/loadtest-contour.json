@@ -1,0 +1,96 @@
+{
+  "base": "http://10.1.75.53:3274",
+  "mode": "sync",
+  "input": "contour",
+  "enrich": true,
+  "levels": [
+    {
+      "summary": {
+        "scenario": "single",
+        "mode": "sync",
+        "users": 1,
+        "requests": 1,
+        "ok": 1,
+        "busy_503": 0,
+        "other_errors": 0,
+        "p50_s": 10.9,
+        "p95_s": 10.9,
+        "max_s": 10.9,
+        "follow_ups_ok": "1/1",
+        "instances_used": 1,
+        "wall_s": 12.9
+      },
+      "calls": [
+        {
+          "user": "f2bae69ead7240868add7c3b",
+          "upstream": "172.17.0.75:4000",
+          "status": 200,
+          "seconds": 10.857864737510681,
+          "follow_up": 200,
+          "detail": ""
+        }
+      ]
+    },
+    {
+      "summary": {
+        "scenario": "spread",
+        "mode": "sync",
+        "users": 3,
+        "requests": 3,
+        "ok": 3,
+        "busy_503": 0,
+        "other_errors": 0,
+        "p50_s": 11.6,
+        "p95_s": 12.6,
+        "max_s": 12.6,
+        "follow_ups_ok": "3/3",
+        "instances_used": 3,
+        "wall_s": 14.8
+      },
+      "calls": [
+        {
+          "user": "f2bae69ead7240868add7c3b",
+          "upstream": "172.17.0.75:4000",
+          "status": 200,
+          "seconds": 10.578469571657479,
+          "follow_up": 200,
+          "detail": ""
+        },
+        {
+          "user": "29a3615d19c0465691384e49",
+          "upstream": "172.17.0.77:4000",
+          "status": 200,
+          "seconds": 11.627725253812969,
+          "follow_up": 200,
+          "detail": ""
+        },
+        {
+          "user": "e4a1f6cd85554222a2d3e588",
+          "upstream": "172.17.0.76:4000",
+          "status": 200,
+          "seconds": 12.636973342858255,
+          "follow_up": 200,
+          "detail": ""
+        }
+      ]
+    }
+  ],
+  "memory": {
+    "sys2": {
+      "peak_mb": 344,
+      "peak_cgroup_mb": 511,
+      "oom_kills": 0
+    },
+    "sys3": {
+      "peak_mb": 403,
+      "peak_cgroup_mb": 511,
+      "oom_kills": 0
+    },
+    "sys4": {
+      "peak_mb": 399,
+      "peak_cgroup_mb": 511,
+      "oom_kills": 0
+    }
+  },
+  "memory_basis": "anonymous (process) memory sampled once a second on each system during the run; oom_kills counts kills since sampling began"
+}

@@ -1,0 +1,62 @@
+# Contour gateway: one public port in front of the API instances.
+# Rendered by deploy/render_gateway.py; do not edit the rendered copy.
+#
+# Every instance serves the whole app (UI and API, see backend/app/web.py), so
+# the gateway proxies every path and needs no knowledge of which is which.
+#
+# Affinity is by browser, not by address. The UI sends X-Client-Id on every call
+# and ?client= on download links; a request with neither -- curl, Postman -- is
+# keyed on its full address instead. A user's follow-up calls must reach the
+# instance that holds their terrain. nginx's own ip_hash is deliberately not
+# used: it keys on the first three octets of an IPv4 address, which would send
+# every user on one lab subnet to the same instance.
+
+map $http_x_client_id $contour_client_header {
+    default $http_x_client_id;
+    ""      $arg_client;
+}
+map $contour_client_header $contour_client {
+    default $contour_client_header;
+    ""      $remote_addr;
+}
+
+upstream contour_api {
+    hash $contour_client consistent;
+    # Passive health checks: two failed connections mark an instance down for
+    # 20 s, and its users move to the next instance on the ring until it is
+    # back. The restart loop brings a crashed instance back within seconds.
+@UPSTREAMS@
+    keepalive 16;
+}
+
+server {
+    listen @PORT@;
+    # The API enforces its own 50 MB upload limit with a proper problem
+    # document; this only has to be larger.
+    client_max_body_size 60m;
+
+    location / {
+        proxy_pass http://contour_api;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        # The API logs this as the trace id, so one request can be followed
+        # from the gateway's log into the instance's.
+        proxy_set_header X-Request-ID $request_id;
+        add_header X-Contour-Upstream $upstream_addr always;
+
+        proxy_connect_timeout 3s;
+        proxy_send_timeout 120s;
+        # A cold 100 km² analysis is under a minute; this is the backstop.
+        proxy_read_timeout 180s;
+
+        # Retry another instance only when this one could not be reached.
+        # A busy answer (503) goes back to the client as it is: retrying it on
+        # another instance would put the user's terrain where their follow-up
+        # calls never go.
+        proxy_next_upstream error timeout;
+        proxy_next_upstream_tries 2;
+        proxy_next_upstream_timeout 10s;
+    }
+}
