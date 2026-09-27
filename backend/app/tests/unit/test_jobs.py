@@ -8,6 +8,8 @@ twenty seconds reads as a hang, which is worse than showing nothing.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from app.services import jobs
@@ -289,3 +291,49 @@ class TestUnknownSteps:
     def test_failing_an_unknown_step_is_refused(self) -> None:
         with pytest.raises(KeyError):
             JobProgress().fail_step("magic", "boom")
+
+
+class TestTheMemoryStoreIsBounded:
+    """Each record holds a whole result; on a 512 MB system a day of them kept
+    for the full TTL is the memory the next analysis needs."""
+
+    @staticmethod
+    def record(job_id: str, state: str) -> Any:
+        from app.services.job_store import JobRecord
+
+        return JobRecord(
+            job_id=job_id, progress={"state": state}, params={}, created_at=0.0, updated_at=0.0
+        )
+
+    def test_the_oldest_finished_jobs_go_first(self) -> None:
+        from app.services.job_store import MemoryJobStore
+
+        store = MemoryJobStore(max_records=3)
+        for i in range(5):
+            store.put(self.record(f"j{i}", "done"))
+        assert [store.get(f"j{i}") is not None for i in range(5)] == [
+            False,
+            False,
+            True,
+            True,
+            True,
+        ]
+
+    def test_a_running_job_is_never_evicted(self) -> None:
+        from app.services.job_store import MemoryJobStore
+
+        store = MemoryJobStore(max_records=2)
+        store.put(self.record("running", "running"))
+        for i in range(4):
+            store.put(self.record(f"d{i}", "done"))
+        assert store.get("running") is not None
+
+    def test_an_update_refreshes_a_jobs_place(self) -> None:
+        from app.services.job_store import MemoryJobStore
+
+        store = MemoryJobStore(max_records=2)
+        store.put(self.record("a", "done"))
+        store.put(self.record("b", "done"))
+        store.put(self.record("a", "done"))  # a is now the newest
+        store.put(self.record("c", "done"))
+        assert store.get("a") is not None and store.get("b") is None

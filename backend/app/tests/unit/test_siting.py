@@ -480,3 +480,50 @@ class TestRegressions:
         assert (
             deps[0].slope_pct > filled_mean
         ), "reported slope looks like the filled surface, not the real ground"
+
+
+class TestAVetoedDepressionIsNeverASite:
+    """A depression with no buildable ground used to fall back to *any* of its
+    cells: sites landed on existing tanks, under buildings, and outside a drawn
+    area. The veto has to hold for depressions as it does for channels."""
+
+    @staticmethod
+    def bowl_mask(dem, centre, radius: float = 8.0):  # type: ignore[no-untyped-def]
+        rr, cc = np.mgrid[0 : dem.shape[0], 0 : dem.shape[1]]
+        return np.hypot(rr - centre[0], cc - centre[1]) <= radius
+
+    def test_a_wholly_excluded_bowl_is_not_proposed(self) -> None:
+        """The existing-tank case: the bowl is water, so it is excluded outright."""
+        dem, cond, flow, centre = bowl_in_a_valley()
+        excluded = self.bowl_mask(dem, centre)
+        res = siting.identify_pond_sites(
+            dem, cond, flow, max_sites=10, min_separation_m=40.0, excluded=excluded
+        )
+        for site in res.sites:
+            assert not excluded[
+                site.row, site.col
+            ], f"site on excluded ground at {site.row, site.col}"
+        assert not any(s.kind == "natural_depression" for s in res.sites)
+        assert any("not proposed" in w for w in res.warnings), res.warnings
+
+    def test_a_partly_excluded_bowl_puts_its_site_on_the_open_part(self) -> None:
+        dem, cond, flow, (br, bc) = bowl_in_a_valley()
+        rr, cc = np.mgrid[0 : dem.shape[0], 0 : dem.shape[1]]
+        excluded = self.bowl_mask(dem, (br, bc)) & (cc < bc)  # the west half
+        res = siting.identify_pond_sites(
+            dem, cond, flow, max_sites=10, min_separation_m=40.0, excluded=excluded
+        )
+        bowl_sites = [s for s in res.sites if s.kind == "natural_depression"]
+        assert bowl_sites, res.warnings
+        for site in res.sites:
+            assert not excluded[site.row, site.col]
+
+    def test_no_site_anywhere_on_excluded_ground(self) -> None:
+        """Whatever is excluded, and however many sites are asked for."""
+        dem, cond, flow, _ = bowl_in_a_valley()
+        excluded = np.zeros(dem.shape, dtype=bool)
+        excluded[: dem.shape[0] // 2, :] = True  # the whole northern half
+        res = siting.identify_pond_sites(
+            dem, cond, flow, max_sites=25, min_separation_m=20.0, excluded=excluded
+        )
+        assert all(not excluded[s.row, s.col] for s in res.sites)

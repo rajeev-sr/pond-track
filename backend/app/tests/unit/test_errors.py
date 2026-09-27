@@ -60,3 +60,16 @@ class TestProblemShape:
     def test_is_an_exception(self) -> None:
         with pytest.raises(ProblemError):
             raise UnanswerableProblem("this point receives negligible runoff")
+
+
+class TestAnUnreachableDatabaseIsNamed:
+    """The lab systems run without Postgres; typing a village name used to give
+    a bare 500 "unexpected error"."""
+
+    def test_village_search_without_a_database_is_a_503_that_says_why(self, client) -> None:  # type: ignore[no-untyped-def]
+        response = client.get("/api/v1/villages/search", params={"q": "durg"})
+        assert response.status_code == 503
+        body = response.json()
+        assert body["type"] == "/errors/database-unavailable"
+        assert "draw the area" in body["detail"]
+        assert body["trace_id"]

@@ -333,3 +333,52 @@ class TestBudget:
     def test_fast_providers_still_land_within_a_tight_budget(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
         patch(monkeypatch, soil=fake_soil(), cover=fake_cover(), rain=_FakeEnsemble())
         assert enr.fetch_enrichment(bounds(), dem(), budget_s=5.0).tier == "full"
+
+
+class TestOneSlowRainfallSource:
+    """The lab failure: Open-Meteo took ~70 s to send its 429 while POWER's series
+    sat in the cache, and the ensemble waited for both -- so rainfall missed the
+    deadline on every run and the tier fell to `terrain_only`."""
+
+    def test_the_source_that_answered_is_used(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        import threading
+        import time as _time
+
+        from app.providers.rainfall import ensemble
+
+        release = threading.Event()
+
+        def slow_refusal(*_a, **_k):  # type: ignore[no-untyped-def]
+            release.wait(10.0)
+            raise ProviderUnavailableError("open_meteo_era5_land", "HTTP 429")
+
+        monkeypatch.setattr(
+            ensemble,
+            "SOURCES",
+            (("open_meteo_era5_land", slow_refusal), ("nasa_power", lambda *a, **k: _FakeRain())),
+        )
+        patch(monkeypatch, soil=fake_soil(), cover=fake_cover())
+        try:
+            t = _time.perf_counter()
+            e = enr.fetch_enrichment(bounds(), dem(), budget_s=2.0)
+            elapsed = _time.perf_counter() - t
+        finally:
+            release.set()
+
+        assert elapsed < 2.0, f"the slow source held the phase ({elapsed:.1f}s)"
+        assert e.tier == "full"
+        assert e.rainfall_ensemble is not None
+        assert e.rainfall_ensemble.primary_source == "nasa_power"
+        assert "budget" in e.rainfall_ensemble.failures[0]["reason"]
+        assert not any(f["layer"] == "rainfall" for f in e.failures)
+
+    def test_the_ensemble_stops_before_the_phase_does(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        seen: dict[str, object] = {}
+
+        def rain(*_a, **k):  # type: ignore[no-untyped-def]
+            seen.update(k)
+            return _FakeEnsemble()
+
+        patch(monkeypatch, soil=fake_soil(), cover=fake_cover(), rain=rain)
+        enr.fetch_enrichment(bounds(), dem(), budget_s=20.0)
+        assert seen["budget_s"] == 20.0 - enr.RAIN_MARGIN_S

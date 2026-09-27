@@ -233,3 +233,127 @@ class TestTheRelationSupplementSurvivesTheCache:
         payload["version"] = 999
         target.write_text(json.dumps(payload))
         assert osm_cache.read(tmp_path, BOUNDS) is None
+
+
+class TestARefusalIsRememberedBriefly:
+    """Public Overpass refuses large windows for minutes at a time. Without a
+    memory of that, every run over the window spent its whole 20 s enrichment
+    budget asking again -- warm or not -- and added to the servers' load."""
+
+    @staticmethod
+    def refusing() -> tuple[list[int], object]:
+        from app.providers.base import ProviderUnavailableError
+
+        calls: list[int] = []
+
+        def fetch(_bounds: object) -> OsmContext:
+            calls.append(1)
+            raise ProviderUnavailableError("overpass", "HTTP 504 from every mirror")
+
+        return calls, fetch
+
+    def test_a_second_run_does_not_ask_again(self, tmp_path: Path) -> None:
+        from app.providers.base import ProviderUnavailableError
+
+        calls, fetch = self.refusing()
+        for _ in range(3):
+            with pytest.raises(ProviderUnavailableError):
+                osm_cache.fetch_cached(BOUNDS, tmp_path, fetch=fetch)
+        assert len(calls) == 1
+
+    def test_the_answer_says_it_is_remembered_not_fresh(self, tmp_path: Path) -> None:
+        from app.providers.base import ProviderUnavailableError
+
+        _, fetch = self.refusing()
+        with pytest.raises(ProviderUnavailableError):
+            osm_cache.fetch_cached(BOUNDS, tmp_path, fetch=fetch)
+        with pytest.raises(ProviderUnavailableError, match="asked again after"):
+            osm_cache.fetch_cached(BOUNDS, tmp_path, fetch=fetch)
+
+    def test_it_is_asked_again_once_the_memory_expires(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from app.providers.base import ProviderUnavailableError
+
+        calls, fetch = self.refusing()
+        with pytest.raises(ProviderUnavailableError):
+            osm_cache.fetch_cached(BOUNDS, tmp_path, fetch=fetch)
+        monkeypatch.setattr(osm_cache, "FAILURE_TTL_S", -1)
+        with pytest.raises(ProviderUnavailableError):
+            osm_cache.fetch_cached(BOUNDS, tmp_path, fetch=fetch)
+        assert len(calls) == 2
+
+    def test_a_success_clears_the_memory(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from app.providers.base import ProviderUnavailableError
+
+        _, refuse = self.refusing()
+        with pytest.raises(ProviderUnavailableError):
+            osm_cache.fetch_cached(BOUNDS, tmp_path, fetch=refuse)
+        monkeypatch.setattr(osm_cache, "FAILURE_TTL_S", -1)
+        got, cached = osm_cache.fetch_cached(BOUNDS, tmp_path, fetch=lambda _b: context())
+        assert not cached and got.total > 0
+        assert not osm_cache._refusal_path(tmp_path, BOUNDS).exists()
+
+    def test_other_windows_are_unaffected(self, tmp_path: Path) -> None:
+        from app.providers.base import ProviderUnavailableError
+
+        _, refuse = self.refusing()
+        with pytest.raises(ProviderUnavailableError):
+            osm_cache.fetch_cached(BOUNDS, tmp_path, fetch=refuse)
+        elsewhere = (BOUNDS[0] + 0.1, BOUNDS[1], BOUNDS[2] + 0.1, BOUNDS[3])
+        got, _ = osm_cache.fetch_cached(elsewhere, tmp_path, fetch=lambda _b: context())
+        assert got.total > 0
+
+
+class TestOneRequestPerWindow:
+    def test_concurrent_runs_share_one_request(self, tmp_path: Path) -> None:
+        import threading
+
+        calls: list[int] = []
+
+        def slow(_bounds: object) -> OsmContext:
+            calls.append(1)
+            time.sleep(0.3)
+            return context()
+
+        results: list[tuple[OsmContext, bool]] = []
+        threads = [
+            threading.Thread(
+                target=lambda: results.append(osm_cache.fetch_cached(BOUNDS, tmp_path, fetch=slow))
+            )
+            for _ in range(4)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+        assert len(calls) == 1
+        assert len(results) == 4
+        assert all(ctx.total > 0 for ctx, _ in results)
+        assert sum(1 for _, cached in results if not cached) == 1
+
+    def test_waiters_learn_of_a_failure_too(self, tmp_path: Path) -> None:
+        import threading
+
+        from app.providers.base import ProviderUnavailableError
+
+        def slow_refusal(_bounds: object) -> OsmContext:
+            time.sleep(0.3)
+            raise ProviderUnavailableError("overpass", "HTTP 504")
+
+        errors: list[Exception] = []
+
+        def run() -> None:
+            try:
+                osm_cache.fetch_cached(BOUNDS, tmp_path, fetch=slow_refusal)
+            except ProviderUnavailableError as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=run) for _ in range(3)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+        assert len(errors) == 3

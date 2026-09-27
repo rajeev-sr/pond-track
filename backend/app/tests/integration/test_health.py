@@ -51,13 +51,38 @@ class TestReadiness:
         assert set(body["checks"]) == {"database", "redis"}, "a dependency vanished from the report"
 
         # Each check is `{"status": "ok" | ..., "latency_ms": ...}`.
-        all_up = all(check.get("status") == "ok" for check in body["checks"].values())
+        all_up = all(
+            check.get("status") in ("ok", "not_configured") for check in body["checks"].values()
+        )
         if all_up:
             assert r.status_code == 200
             assert body["status"] == "ready"
         else:
             assert r.status_code == 503
             assert body["status"] == "degraded"
+
+    def test_redis_left_unset_is_not_a_fault(self, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+        """The lab deployment runs without Redis on purpose: each API keeps its own
+        jobs and the gateway sends a browser back to its instance. Reported as down,
+        readiness answered 503 `degraded` on a healthy server."""
+        from fastapi.testclient import TestClient
+
+        from app.config import get_settings
+        from app.main import create_app
+
+        monkeypatch.setenv("REDIS_URL", "")
+        get_settings.cache_clear()
+        try:
+            with TestClient(create_app()) as c:
+                body = c.get("/api/v1/health/ready").json()
+        finally:
+            get_settings.cache_clear()
+        assert body["checks"]["redis"]["status"] == "not_configured"
+        # The database is still required: here it is a closed port, and it alone
+        # decides the answer.
+        assert body["status"] == (
+            "ready" if body["checks"]["database"]["status"] == "ok" else "degraded"
+        )
 
     def test_a_closed_port_is_reported_degraded(self, client) -> None:  # type: ignore[no-untyped-def]
         """The offline case specifically: nothing reachable means not ready."""
@@ -112,3 +137,20 @@ class TestOpenApi:
 class TestErrorHandling:
     def test_unknown_route_is_404(self, client) -> None:  # type: ignore[no-untyped-def]
         assert client.get("/api/v1/nope").status_code == 404
+
+
+class TestFeaturesForThePage:
+    """Always 200: the browser logs a 503 as an error, and a page that probes
+    readiness on load would log one on every system without a database."""
+
+    def test_it_answers_200_without_a_database(self, client) -> None:  # type: ignore[no-untyped-def]
+        response = client.get("/api/v1/health/features")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["village_search"]["available"] is False
+        assert body["village_search"]["reason"]
+
+    def test_it_reports_the_analysis_slots_and_limits(self, client) -> None:  # type: ignore[no-untyped-def]
+        body = client.get("/api/v1/health/features").json()
+        assert set(body["analyses"]) == {"limit", "running", "waiting"}
+        assert body["max_area_km2"] == 100.0

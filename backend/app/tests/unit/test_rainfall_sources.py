@@ -142,10 +142,13 @@ def power_payload(
     fill_every: int | None = None,
     missing_temp_every: int | None = None,
     drop_temp_keys: bool = False,
+    with_range: bool = False,
 ) -> dict[str, object]:
     """A NASA POWER response, keyed by YYYYMMDD as the real one is."""
     precip: dict[str, float] = {}
     temp: dict[str, float] = {}
+    tmax: dict[str, float] = {}
+    tmin: dict[str, float] = {}
     day = dt.date(2021, 1, 1)
     for index in range(days):
         key = day.strftime("%Y%m%d")
@@ -161,8 +164,13 @@ def power_payload(
                 if (missing_temp_every and index % missing_temp_every == 0)
                 else 28.0
             )
+        if with_range:
+            tmax[key], tmin[key] = 34.0, 22.0
         day += dt.timedelta(days=1)
-    return {"properties": {"parameter": {"PRECTOTCORR": precip, "T2M": temp}}}
+    parameter: dict[str, object] = {"PRECTOTCORR": precip, "T2M": temp}
+    if with_range:
+        parameter.update({"T2M_MAX": tmax, "T2M_MIN": tmin})
+    return {"properties": {"parameter": parameter}}
 
 
 class TestNasaPower:
@@ -295,3 +303,266 @@ class TestTheEnsemble:
         from app.providers.rainfall.ensemble import temperature_from
 
         assert temperature_from(self.build({"a": stats_for(temp_daily_c=None)})) is None
+
+
+class TestTheEnsembleDeadline:
+    """The caller's deadline wins over the slowest source."""
+
+    def sources(self, monkeypatch: pytest.MonkeyPatch, *, slow: tuple[str, ...]):
+        import threading
+
+        from app.providers.rainfall import ensemble
+
+        release = threading.Event()
+
+        def fetcher(name: str):
+            def fetch(*_a: object, **_k: object):
+                if name in slow:
+                    release.wait(10.0)
+                return stats_for()
+
+            return fetch
+
+        monkeypatch.setattr(
+            ensemble,
+            "SOURCES",
+            tuple((name, fetcher(name)) for name in ("open_meteo_era5_land", "nasa_power")),
+        )
+        return release
+
+    def test_it_returns_at_the_budget_with_the_source_that_answered(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import time
+
+        from app.providers.rainfall import ensemble
+
+        release = self.sources(monkeypatch, slow=("open_meteo_era5_land",))
+        try:
+            t = time.perf_counter()
+            result = ensemble.fetch_ensemble(81.3, 21.25, years=3, budget_s=0.3)
+            elapsed = time.perf_counter() - t
+        finally:
+            release.set()
+        assert elapsed < 2.0, f"it waited for the slow source ({elapsed:.1f}s)"
+        assert result.primary_source == "nasa_power"
+        assert result.failures == [
+            {"source": "open_meteo_era5_land", "reason": "did not answer within the 0.3 s budget"}
+        ]
+
+    def test_with_no_source_in_time_it_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.providers.rainfall import ensemble
+
+        release = self.sources(monkeypatch, slow=("open_meteo_era5_land", "nasa_power"))
+        try:
+            with pytest.raises(ProviderUnavailableError, match="no rainfall source answered"):
+                ensemble.fetch_ensemble(81.3, 21.25, years=3, budget_s=0.2)
+        finally:
+            release.set()
+
+
+class TestOpenMeteoRemembersARefusal:
+    """From the lab network Open-Meteo took ~70 s to send its 429. Asking again on
+    every analysis spent the enrichment budget on an answer known in advance."""
+
+    def refuse(
+        self, monkeypatch: pytest.MonkeyPatch, detail: str = "HTTP 429 from open-meteo"
+    ) -> list[int]:
+        from app.providers.rainfall import open_meteo
+
+        calls: list[int] = []
+
+        def get_json(*_a: object, **_k: object) -> None:
+            calls.append(1)
+            raise ProviderUnavailableError(open_meteo.PROVIDER, detail)
+
+        monkeypatch.setattr(open_meteo, "get_json", get_json)
+        return calls
+
+    def fetch(self) -> object:
+        from app.providers.rainfall import open_meteo
+
+        return open_meteo.fetch_rainfall(81.3, 21.25, years=3)
+
+    def test_a_rate_limit_is_not_asked_again_at_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        calls = self.refuse(monkeypatch)
+        with pytest.raises(ProviderUnavailableError, match="HTTP 429"):
+            self.fetch()
+        with pytest.raises(ProviderUnavailableError, match="asked again after 60 min"):
+            self.fetch()
+        assert len(calls) == 1
+
+    def test_an_unreachable_service_counts_as_a_refusal(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = self.refuse(monkeypatch, "request failed: ConnectTimeout")
+        for _ in range(3):
+            with pytest.raises(ProviderUnavailableError, match="ConnectTimeout"):
+                self.fetch()
+        assert len(calls) == 1
+
+    def test_a_bad_answer_is_not_a_refusal(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A 400 is about this request, not the service: the next one may be fine."""
+        calls = self.refuse(monkeypatch, "HTTP 400 from open-meteo")
+        for _ in range(2):
+            with pytest.raises(ProviderUnavailableError, match="HTTP 400"):
+                self.fetch()
+        assert len(calls) == 2
+
+    def test_an_old_refusal_is_rechecked_off_the_request_path(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The run does not wait for the re-probe; the probe renews the refusal."""
+        import time
+
+        from app.providers.rainfall import open_meteo
+
+        calls = self.refuse(monkeypatch)
+        open_meteo._refusal = (time.monotonic() - open_meteo.REFUSAL_TTL_S - 1, "HTTP 429 old")
+        with pytest.raises(ProviderUnavailableError, match="being asked again in the background"):
+            self.fetch()
+        assert open_meteo._reprobe is not None
+        open_meteo._reprobe.join(5.0)
+        assert len(calls) == 1
+        assert open_meteo._refusal is not None
+        assert open_meteo._refusal[1] == "HTTP 429 from open-meteo"  # renewed
+
+    def test_when_it_answers_again_the_refusal_is_forgotten(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import time
+
+        from app.providers.rainfall import open_meteo
+
+        monkeypatch.setattr(open_meteo, "get_json", lambda *a, **k: {"daily": {}})
+        open_meteo._refusal = (time.monotonic() - open_meteo.REFUSAL_TTL_S - 1, "HTTP 429 old")
+        with pytest.raises(ProviderUnavailableError, match="in the background"):
+            self.fetch()
+        assert open_meteo._reprobe is not None
+        open_meteo._reprobe.join(5.0)
+        assert open_meteo._refusal is None
+
+    def test_the_refusal_is_learnt_from_a_one_day_probe(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The thirty-year request's refusal is slow; the probe's is not, so the
+        full request is never made while Open-Meteo is refusing."""
+        from app.providers.rainfall import open_meteo
+
+        asked: list[str] = []
+
+        def get_json(*_a: object, params: dict[str, object], **_k: object) -> None:
+            one_day = params["start_date"] == params["end_date"]
+            asked.append("probe" if one_day else "full")
+            raise ProviderUnavailableError(open_meteo.PROVIDER, "HTTP 429 from open-meteo")
+
+        monkeypatch.setattr(open_meteo, "get_json", get_json)
+        with pytest.raises(ProviderUnavailableError, match="HTTP 429"):
+            self.fetch()
+        assert asked == ["probe"]
+
+    def test_with_quota_left_the_full_series_is_fetched(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from app.providers.rainfall import open_meteo
+
+        rain, dates, _ = series(range(2019, 2024))
+        asked: list[str] = []
+
+        def get_json(*_a: object, params: dict[str, object], **_k: object) -> object:
+            one_day = params["start_date"] == params["end_date"]
+            asked.append("probe" if one_day else "full")
+            return {
+                "daily": {
+                    "time": [d.isoformat() for d in dates],
+                    "precipitation_sum": list(rain),
+                    "et0_fao_evapotranspiration": [4.0] * len(dates),
+                }
+            }
+
+        monkeypatch.setattr(open_meteo, "get_json", get_json)
+        stats = self.fetch()
+        assert asked == ["probe", "full"]
+        assert stats.mean_annual_mm > 0  # type: ignore[attr-defined]
+
+    def test_the_cache_is_still_served_while_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.providers.rainfall import open_meteo
+
+        self.refuse(monkeypatch)
+        with pytest.raises(ProviderUnavailableError):
+            self.fetch()
+        cached = stats_for()
+        monkeypatch.setattr(open_meteo.cache, "stats_from_cache", lambda *a, **k: cached)
+        assert self.fetch() is cached
+
+
+class TestReferenceEvapotranspirationFromTemperature:
+    """Open-Meteo, the source that carries ET0, rate-limits often; without ET0
+    the water balance was unavailable on otherwise full-tier runs. NASA POWER's
+    daily temperature range gives it by FAO-56's Hargreaves equation."""
+
+    def test_extraterrestrial_radiation_matches_fao56_example_8(self) -> None:
+        """3 September at 20 deg S: Ra = 32.2 MJ m-2 day-1 in the worked example."""
+        from app.providers.rainfall import et0
+
+        assert et0.extraterrestrial_radiation(-20.0, 246) == pytest.approx(32.2, abs=0.1)
+
+    def test_polar_night_is_zero_not_an_error(self) -> None:
+        from app.providers.rainfall import et0
+
+        assert et0.extraterrestrial_radiation(80.0, 355) == pytest.approx(0.0, abs=1e-9)
+
+    def test_hargreaves_by_hand(self) -> None:
+        """0.0023 x (28 + 17.8) x sqrt(12) x Ra x 0.408, worked independently."""
+        import math
+
+        from app.providers.rainfall import et0
+
+        day = dt.date(2021, 6, 21)
+        ra = et0.extraterrestrial_radiation(21.25, day.timetuple().tm_yday)
+        expected = 0.0023 * (28.0 + 17.8) * math.sqrt(12.0) * ra * 0.408
+        got = et0.hargreaves([day], np.array([34.0]), np.array([22.0]), 21.25)
+        assert got[0] == pytest.approx(expected, rel=1e-9)
+        assert 4.0 < got[0] < 8.0  # a hot June day in central India
+
+    def test_a_missing_or_inverted_range_is_no_value(self) -> None:
+        from app.providers.rainfall import et0
+
+        days = [dt.date(2021, 1, 1), dt.date(2021, 1, 2)]
+        got = et0.hargreaves(days, np.array([np.nan, 20.0]), np.array([10.0, 25.0]), 21.25)
+        assert np.isnan(got).all()
+
+    def test_gaps_take_the_months_mean(self) -> None:
+        from app.providers.rainfall import et0
+
+        days = [dt.date(2021, 1, d) for d in (1, 2, 3)]
+        filled, gaps = et0.fill_by_month(days, np.array([3.0, np.nan, 5.0]))
+        assert gaps == 1
+        assert filled is not None and filled[1] == pytest.approx(4.0)
+
+    def test_a_month_with_no_value_at_all_is_refused(self) -> None:
+        from app.providers.rainfall import et0
+
+        days = [dt.date(2021, 1, 1), dt.date(2021, 2, 1)]
+        filled, _ = et0.fill_by_month(days, np.array([3.0, np.nan]))
+        assert filled is None
+
+    def test_nasa_power_now_supplies_monthly_et0(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(nasa_power, "get_json", lambda *a, **k: power_payload(with_range=True))
+        stats = nasa_power.fetch_rainfall(81.3, 21.25, years=3)
+        assert stats.et0_monthly_mm is not None
+        assert len(stats.et0_monthly_mm) == 12
+        assert all(v > 0 for v in stats.et0_monthly_mm)
+        # Central India: roughly 1,400-2,000 mm a year by any method.
+        assert stats.et0_annual_mm is not None and 1_200 < stats.et0_annual_mm < 2_400
+
+    def test_without_the_range_there_is_still_rainfall(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(nasa_power, "get_json", lambda *a, **k: power_payload())
+        stats = nasa_power.fetch_rainfall(81.3, 21.25, years=3)
+        assert stats.et0_monthly_mm is None
+        assert stats.mean_annual_mm > 0
+
+    def test_it_asks_for_the_temperature_range(self) -> None:
+        assert {"T2M_MAX", "T2M_MIN"} <= set(nasa_power.PARAMETERS)
