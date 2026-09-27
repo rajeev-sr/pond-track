@@ -9,12 +9,23 @@ testable without a broker.
 
 from __future__ import annotations
 
+import threading
+import time
 from typing import Any
 
 from app.core.logging import get_logger
 from app.workers.celery_app import celery_app
 
 log = get_logger("workers.tasks")
+
+#: How long "no worker answered" is trusted. With the broker down the ping takes
+#: ~6 s to fail (measured on the lab systems, where Celery retries a refused
+#: connection), and it was paid on every job submission.
+NO_WORKER_TTL_S = 60.0
+
+_check_lock = threading.Lock()
+#: time.monotonic() of the last ping that found no worker, or None.
+_no_worker_since: float | None = None
 
 
 @celery_app.task(name="contour.analyze", bind=True, max_retries=0)
@@ -47,10 +58,24 @@ def worker_available(timeout: float = 0.5) -> bool:
     service but it is not necessarily running, and accepting a job into a queue
     nothing is draining would leave the client polling `queued` forever -- the
     one failure mode an async API must not have.
+
+    No broker configured (`REDIS_URL` empty) means no worker, without asking;
+    a ping that found none is trusted for `NO_WORKER_TTL_S`.
     """
+    global _no_worker_since
+    from app.config import get_settings
+
+    if not get_settings().REDIS_URL:
+        return False
+    with _check_lock:
+        since = _no_worker_since
+    if since is not None and time.monotonic() - since < NO_WORKER_TTL_S:
+        return False
     try:
         replies = celery_app.control.inspect(timeout=timeout).ping()
     except Exception as exc:
         log.info("no celery worker reachable", error=str(exc))
-        return False
+        replies = None
+    with _check_lock:
+        _no_worker_since = None if replies else time.monotonic()
     return bool(replies)

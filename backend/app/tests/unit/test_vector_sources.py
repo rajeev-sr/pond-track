@@ -367,3 +367,32 @@ class TestTheLgdCrosswalk:
 
         assert lgd_codes.DATAVERSE_FILE_ID == 11058283
         assert str(lgd_codes.DATAVERSE_FILE_ID) in lgd_codes.DOWNLOAD_URL
+
+
+class TestALevelRenamedIsNotALevelRedefined:
+    """geoBoundaries relabelled India's ADM1 "State / Union Territory" in 2026,
+    and the seed refused to run: the check read a better name for the same 36
+    units as a change of meaning."""
+
+    def test_the_new_adm1_label_is_the_same_level(self) -> None:
+        assert geoboundaries.same_level("ADM1", "state / union territory")
+        assert geoboundaries.same_level("ADM1", "State")
+
+    def test_hyphens_and_spaces_do_not_matter(self) -> None:
+        assert geoboundaries.same_level("ADM3", "Sub-District")
+        assert geoboundaries.same_level("ADM3", "sub district")
+
+    def test_a_real_redefinition_still_stops_the_seed(self) -> None:
+        """What the check exists for: CD blocks in a sub-district column."""
+        assert not geoboundaries.same_level("ADM3", "CD Block")
+        assert not geoboundaries.same_level("ADM2", "state / union territory")
+
+    def test_the_seed_caches_somewhere_writable_outside_the_container(self) -> None:
+        import importlib
+        import os
+
+        cache = importlib.import_module("scripts.seed_villages").default_cache()
+        writable = cache.parent
+        while not writable.exists():
+            writable = writable.parent
+        assert os.access(writable, os.W_OK), cache

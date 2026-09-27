@@ -1,9 +1,9 @@
 # Contour — AI-based Village Pond Planning System
 
-Upload a **contour map** of a village and get back where a pond should go, how
-much land drains to it, how much runoff that catchment yields, and how deep and
-how large the pond should be — as structured JSON, on an interactive map-ready
-GeoJSON footing.
+Upload a **contour map** of a village — or **select an area on the map** — and get
+back where a pond should go, how much land drains to it, how much water it can
+collect, and how deep and how large the pond should be: as structured JSON, and
+drawn on the map.
 
 ```bash
 cp .env.example .env
@@ -13,7 +13,8 @@ docker compose up -d
 
 Then open **http://localhost:8000/docs**.
 
-No API key is needed. Runs locally; nothing is deployed.
+No API key is needed. The deployment on the four lab systems is described under
+[Running it on the lab systems](#running-it-on-the-lab-systems).
 
 ---
 
@@ -50,6 +51,33 @@ Every number above is derived from the uploaded file and its location. Nothing
 about this particular map is in the code.
 
 ---
+
+## Selecting an area on the map
+
+No contour survey? Draw a rectangle instead. In the workspace, **Draw area on
+map** turns a drag into a rectangle (its size is shown as you draw), and **Use
+the sample area** draws the sample sheet's extent in one click. Through the API:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/analyzeArea \
+  -H 'Content-Type: application/json' \
+  -d '{"bbox": [81.2814, 21.2398, 81.3126, 21.2636]}'
+```
+
+The terrain is the Copernicus GLO-30 elevation model, read for the rectangle plus
+a 500 m margin so catchments that begin outside the line are measured whole;
+sites are proposed only inside it. Every response — contour or area — opens with
+a `summary` of the three results for the recommended site: **pond location**,
+**catchment area**, and **expected water volume** (the pond's live storage capped
+by the catchment's 75 % dependable inflow). On the map the recommended marker
+reads `#1 · 68,203 m³`, the catchment is labelled with its area, and clicking any
+site opens all three.
+
+Limits: 0.1–100 km². At 30 m the terrain is coarser than a surveyed sheet — over
+the sample extent it agrees with the 5 m contour surface at r = 0.905, but picks
+different sites — so use a selected area to screen a village, and a contour
+upload where a survey exists. `scripts/compare_area_vs_contour.py` reproduces the
+comparison.
 
 ## Why it generalises
 
@@ -165,13 +193,17 @@ the tier and appears in `provider_failures` — it never fails the request.
 |---|---|---|
 | `POST` | `/api/v1/analyzeContour` | Upload a contour map → sites, catchments, runoff, pond design |
 | `POST` | `/api/v1/findCatchment` | Alias of the above |
+| `POST` | `/api/v1/analyzeArea` | Analyse a rectangle drawn on the map (Copernicus 30 m terrain) → the same document |
 | `POST` | `/api/v1/analysis` | The same analysis as a background job → `202` + `job_id` |
+| `POST` | `/api/v1/analysis/area` | A drawn rectangle as a background job → `202` + `job_id` |
 | `GET` | `/api/v1/analysis/{job_id}/status` | State, weighted percentage, per-step outcomes |
 | `GET` | `/api/v1/analysis/{job_id}/result` | The finished document — served for `partial` too |
 | `DELETE` | `/api/v1/analysis/{job_id}` | Abandon a job and drop its record |
 | `POST` | `/api/v1/terrain/contour-map` | Parse and interpolate only → `dem_id` |
 | `GET` | `/api/v1/terrain/contour-map/{dem_id}/contours` | Echo the parsed contours as GeoJSON |
 | `POST` | `/api/v1/terrain/derivatives` | Slope + shaded relief as COG tile templates |
+| `GET` | `/api/v1/terrain/{dem_id}/overlays` | Slope + shaded relief as map images, no tile server |
+| `GET` | `/api/v1/terrain/{dem_id}/overlay/{product}` | One of those images |
 | `POST` | `/api/v1/terrain/contours` | Regenerate contours at any interval, with index lines |
 | `POST` | `/api/v1/hydrology/streams` | Drainage network with Strahler order + drainage density |
 | `POST` | `/api/v1/hydrology/catchment` | Delineate the catchment above any point |
@@ -192,6 +224,7 @@ the tier and appears in `provider_failures` — it never fails the request.
 | `GET` | `/api/v1/villages/resolve?lon=&lat=` | Reverse-geocode a point |
 | `GET` | `/api/v1/health` | Liveness — never touches a backing service |
 | `GET` | `/api/v1/health/ready` | Readiness, plus which optional layers are configured |
+| `GET` | `/api/v1/health/features` | What this server offers the UI (village search, analysis slots); always 200 |
 | `GET` | `/docs` · `/openapi.json` | Interactive docs, with a real captured response |
 
 ### Requirement → endpoint
@@ -334,6 +367,62 @@ curl -X POST http://localhost:8000/api/v1/analyzeContour \
 
 Installation detail and troubleshooting: **[docs/INSTALL.md](docs/INSTALL.md)**.
 
+### Running it on the lab systems
+
+**Live at <http://10.1.75.53:3274>.** Three lab systems of 512 MB and one CPU
+each serve it (the fourth, sys1, is unreachable). Each runs one process — the
+API, which also serves the built UI — sys2 runs the gateway in front of all
+three, and sys4 runs PostgreSQL/PostGIS for village search and the rainfall
+cache:
+
+```bash
+(cd frontend && npm ci && npm run build)             # once: the UI each API serves
+deploy/supervise.sh api deploy/run-api.sh 4000       # on each system
+python3 deploy/render_gateway.py --port 3000 --run-dir ~/contour-run \
+    --api 172.17.0.75:4000 --api 172.17.0.76:4000 --api 172.17.0.77:4000
+deploy/supervise.sh gateway nginx -c ~/contour-run/nginx.conf -g 'daemon off;'   # sys2
+```
+
+The lab publishes each system's internal ports 3000–7000 on 10.1.75.53 as
+*internal + 272 + n* for system *n*, so the gateway on sys2's port 3000 is the
+public 3274; the systems reach each other directly on 172.17.0.x.
+
+- **One analysis per system** (`MAX_CONCURRENT_ANALYSES=1`): a direct API call
+  beyond that gets `503` with `Retry-After`; a run from the UI waits in a queue.
+- **Affinity by browser**: the UI sends a per-browser `X-Client-Id` and the
+  gateway hashes on it, so follow-up calls reach the system holding the terrain.
+- **Restarted if it dies** (`deploy/supervise.sh`), and the gateway routes around
+  a system that stops answering.
+- **No reliance on the lab's internet for Chhattisgarh.** From the lab, S3,
+  NASA POWER and SoilGrids time out and Open-Meteo answers 429, so the 26
+  Copernicus tiles covering the state are kept on each system and 30 years of
+  NASA POWER daily rainfall for its 65 cells are in the database. After a 429,
+  Open-Meteo is left alone for an hour and NASA POWER answers instead. Soil,
+  land cover and OpenStreetMap stay best-effort: a layer that misses the 20 s
+  budget is named in the response, and the answer still carries the pond, its
+  catchment and its volume.
+
+Before touching the real systems, the same arrangement runs locally — four API
+containers limited to 512 MB and one CPU each, behind the same gateway config:
+
+```bash
+python3 deploy/render_gateway.py --lab
+UID=$(id -u) GID=$(id -g) docker compose -f deploy/lab/compose.yml up -d
+python3 scripts/loadtest.py --base http://localhost:3273     # latency, 503s, memory
+python3 scripts/failover_check.py                             # kill one, watch its user
+```
+
+Measured this way: four users on four systems are served as fast as one user on
+one (3.0 s for the sample area, 6.6 s for the sample sheet), overload becomes
+503s or a queue rather than an OOM kill, and a killed instance's user is served
+by another system within seconds.
+
+Measured again on the lab systems themselves: three users on three systems are
+served as fast as one on one (1.0 s for the sample area, 11 s for the sample
+sheet), six users queue without a failure, process memory peaks at 403 MB of
+512, and a killed instance's user is served by another system at 1.5 s and back
+on their own at 21.8 s without a request lost. Details: [docs/SUBMISSION_PLAN.md](docs/SUBMISSION_PLAN.md).
+
 ---
 
 ## Development
@@ -341,7 +430,7 @@ Installation detail and troubleshooting: **[docs/INSTALL.md](docs/INSTALL.md)**.
 ```bash
 make venv          # local virtualenv for the test suite
 make screen        # measure candidate test villages against the siting criteria
-make test          # 478 tests, offline, ~30 s
+make test          # 1,478 tests, offline, ~4 min
 make lint          # ruff + black
 make typecheck     # mypy on the domain layer
 make ui-check      # tsc --noEmit on the frontend

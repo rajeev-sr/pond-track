@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,9 +48,22 @@ from app.providers.vector import geoboundaries, lgd_codes, shrug_names
 
 log = logging.getLogger("seed_villages")
 
-#: Cached downloads live here so a re-seed costs nothing. Inside the container
-#: this is the mounted `./data` volume, so the files survive a rebuild.
-DEFAULT_CACHE = Path("/data/seed")
+
+def default_cache() -> Path:
+    """Where downloads are cached, so a re-seed costs nothing.
+
+    `/data/seed` inside the compose stack -- the mounted `./data` volume, so the
+    files survive a rebuild -- and `<repo>/data/seed` anywhere else. A bare-metal
+    host has no writable `/data`, and the seed used to die there before
+    downloading anything.
+    """
+    container = Path("/data")
+    if container.is_dir() and os.access(container, os.W_OK):
+        return container / "seed"
+    return Path(__file__).resolve().parents[2] / "data" / "seed"
+
+
+DEFAULT_CACHE = default_cache()
 
 #: Rows per executemany batch. Large enough that round-trips stop dominating,
 #: small enough that a failure does not roll back an hour of work.
