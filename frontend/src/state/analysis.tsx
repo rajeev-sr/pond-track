@@ -17,10 +17,12 @@ import {
   fetchOverlays,
   fetchLandAvailability,
   fetchStreams,
+  CLIENT_ID,
   fetchVillageBoundary,
   keepConnectionWarm,
   type OnRetry,
 } from "../api/client";
+import { beginAction, endAction } from "../telemetry";
 import type {
   AnalyzeOptions,
   Bbox,
@@ -249,6 +251,7 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
    *  run -- is the same whichever way the terrain came in. */
   const run = useCallback(
     async (
+      input: "area" | "contour",
       start: (
         onProgress: (s: JobStatus) => void,
         signal: AbortSignal,
@@ -262,6 +265,13 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
       setError(null);
       setJobStatus(null);
       setConnection("Contacting the server…");
+      // One trace for the whole Run, when tracing is on: the job start, every
+      // status poll, the result and the follow-up layers are its children.
+      const action = beginAction("ui.run", {
+        "contour.input": input,
+        "contour.client_id": CLIENT_ID,
+      });
+      let failure: unknown;
       try {
         const result = await start(
           (status) => {
@@ -300,6 +310,7 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
           }
         }
       } catch (err) {
+        failure = err;
         if ((err as Error).name === "AbortError") return;
         setError(err as Error);
         setAnalysis(null);
@@ -307,6 +318,7 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
         setStreams(null);
         setStreamSummary(null);
       } finally {
+        endAction(action, failure);
         setBusy(false);
         setConnection(null);
       }
@@ -316,7 +328,7 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
 
   const analyse = useCallback(
     (file: File) =>
-      run((onProgress, signal, onRetry) =>
+      run("contour", (onProgress, signal, onRetry) =>
         analyzeContourAsJob(file, options, onProgress, signal, onRetry),
       ),
     [run, options],
@@ -325,7 +337,7 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
   const analyseArea = useCallback(
     (bbox: Bbox) => {
       setDrawing(false);
-      return run((onProgress, signal, onRetry) =>
+      return run("area", (onProgress, signal, onRetry) =>
         analyzeAreaAsJob(roundBbox(bbox), options, onProgress, signal, onRetry),
       );
     },

@@ -12,6 +12,7 @@ import type {
   VillageBoundary,
   VillageSearchResult,
 } from "./types";
+import { withinAction } from "../telemetry";
 
 const BASE = "/api/v1";
 
@@ -43,11 +44,13 @@ export const CLIENT_ID: string = (() => {
   }
 })();
 
-/** `fetch` with the client id attached. Every API call goes through this. */
+/** `fetch` with the client id attached. Every API call goes through this --
+ *  inside the user action in progress, if tracing is on, so the request and
+ *  everything the server does for it join that action's trace. */
 function api(url: string, init: RequestInit = {}): Promise<Response> {
   const headers = new Headers(init.headers);
   headers.set("X-Client-Id", CLIENT_ID);
-  return fetch(url, { ...init, headers });
+  return withinAction(() => fetch(url, { ...init, headers }));
 }
 
 /** A request that got no answer at all: the connection failed, not the server. */

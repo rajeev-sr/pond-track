@@ -13,6 +13,7 @@ import threading
 import time
 from typing import Any
 
+from app.core import telemetry
 from app.core.logging import get_logger
 from app.workers.celery_app import celery_app
 
@@ -71,11 +72,16 @@ def worker_available(timeout: float = 0.5) -> bool:
         since = _no_worker_since
     if since is not None and time.monotonic() - since < NO_WORKER_TTL_S:
         return False
-    try:
-        replies = celery_app.control.inspect(timeout=timeout).ping()
-    except Exception as exc:
-        log.info("no celery worker reachable", error=str(exc))
-        replies = None
+    # A span of its own: Celery is not instrumented, and an unreachable broker
+    # makes this ping retry for about 6 s -- which, unexplained, read in traces
+    # as a contour upload's 202 taking 6 s with nothing beneath it.
+    with telemetry.span("celery.worker_check", {"messaging.system": "celery"}):
+        try:
+            replies = celery_app.control.inspect(timeout=timeout).ping()
+        except Exception as exc:
+            log.info("no celery worker reachable", error=str(exc))
+            replies = None
+        telemetry.annotate(**{"contour.workers": len(replies or [])})
     with _check_lock:
         _no_worker_since = None if replies else time.monotonic()
     return bool(replies)

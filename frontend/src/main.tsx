@@ -7,8 +7,12 @@ import { Brief } from "./routes/Brief";
 import { Method } from "./routes/Method";
 import { Reference } from "./routes/Reference";
 import { Workspace } from "./routes/Workspace";
+import { startTelemetry } from "./telemetry";
 import "maplibre-gl/dist/maplibre-gl.css";
 import "./styles.css";
+
+// Browser tracing: a no-op unless this bundle was built with VITE_OTEL_TRACES_URL.
+startTelemetry();
 
 /** Real paths rather than hashes: nginx already falls back to index.html
  *  (`try_files $uri $uri/ /index.html`) and the dev server does the same, so a
