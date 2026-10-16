@@ -24,6 +24,7 @@ from typing import Any, Literal, cast
 import numpy as np
 import numpy.typing as npt
 
+from app.core import telemetry
 from app.providers.base import ProviderUnavailableError
 from app.providers.elevation.base import Bounds, DemGrid
 from app.providers.landcover.worldcover import AVAILABILITY, LandCover, fetch_landcover
@@ -301,9 +302,11 @@ def fetch_enrichment(
         from app.providers.vector import osm_cache
         from app.providers.vector.overpass import fetch_osm_context
 
-        context, _cached = osm_cache.fetch_cached(
+        context, cached = osm_cache.fetch_cached(
             bounds.as_tuple(), cache_store, fetch=fetch_osm_context
         )
+        telemetry.record_cache("osm", hit=bool(cached))
+        telemetry.annotate(**{"contour.cache.hit": bool(cached)})
         return context
 
     jobs = {
@@ -320,8 +323,33 @@ def fetch_enrichment(
         "rainfall": "Open-Meteo",
         "existing_water": "OpenStreetMap / Overpass",
     }
+
+    def _layer(name: str, fn: Any) -> Any:
+        """One layer as a span of its own, timed against the shared deadline.
+
+        The layer that misses the deadline is the one a reader of a slow trace
+        is looking for, and it keeps running after the analysis has moved on --
+        so its outcome is `late`, and its span visibly outlasts the stage.
+        """
+
+        def run() -> Any:
+            t = time.perf_counter()
+            outcome = "failed"
+            with telemetry.span(
+                f"enrichment.{name}",
+                {"contour.layer": name, "contour.provider": providers[name]},
+            ):
+                try:
+                    value = fn()
+                    outcome = "late" if time.perf_counter() - t > budget_s else "ok"
+                    return value
+                finally:
+                    telemetry.record_layer(name, time.perf_counter() - t, outcome)
+
+        return run
+
     pool = ThreadPoolExecutor(max_workers=len(jobs))
-    futures = {name: pool.submit(fn) for name, fn in jobs.items()}
+    futures = {name: pool.submit(_layer(name, fn)) for name, fn in jobs.items()}
     try:
         wait(list(futures.values()), timeout=budget_s)
         for name, future in futures.items():
@@ -370,4 +398,11 @@ def fetch_enrichment(
 
     result.elapsed_s = time.perf_counter() - t0
     result.budget_s = budget_s
+    telemetry.record_tier(result.tier)
+    telemetry.annotate(
+        **{
+            "contour.tier": result.tier,
+            "contour.layers_failed": [f["layer"] for f in result.failures],
+        }
+    )
     return result

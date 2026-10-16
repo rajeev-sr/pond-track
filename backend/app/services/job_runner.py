@@ -20,6 +20,7 @@ import uuid
 from collections.abc import Callable, Sequence
 from typing import Any
 
+from app.core import telemetry
 from app.core.logging import get_logger
 from app.core.memory import release_memory
 from app.services import area as area_service
@@ -173,29 +174,48 @@ def _run_job(
     analyse: Callable[[ContourAnalysisOptions, StageReporter], ContourAnalysis],
 ) -> JobRecord:
     """The body both kinds of job share: run, report, settle, register."""
-    target = store if store is not None else get_store()
-    progress = JobProgress(steps=steps)
-    now = time.time()
-    record = JobRecord(
-        job_id=job_id,
-        progress=progress.as_dict(),
-        params=params,
-        created_at=now,
-        updated_at=now,
-        started_at=now,
-    )
-    target.put(record)
+    kind = "area" if steps is AREA_STEPS else "contour"
+    # A child of the request that started it (the job runs as that request's
+    # background task, so its context is inherited) -- one trace then holds the
+    # 202, the wait for a slot, and every stage of the analysis.
+    with telemetry.span("analysis.job", {"contour.job.id": job_id, "contour.input": kind}):
+        target = store if store is not None else get_store()
+        progress = JobProgress(steps=steps)
+        now = time.time()
+        record = JobRecord(
+            job_id=job_id,
+            progress=progress.as_dict(),
+            params=params,
+            created_at=now,
+            updated_at=now,
+            started_at=now,
+        )
+        target.put(record)
 
-    # Wait for an analysis slot while the status still says `queued`: on a
-    # 512 MB system two analyses at once is an OOM kill, and a job that waits
-    # its turn is the honest version of that.
-    slots = capacity.get_slots()
-    slots.acquire()
-    try:
-        return _execute(job_id, record, progress, target, options, analyse)
-    finally:
-        slots.release()
-        release_memory()
+        # Wait for an analysis slot while the status still says `queued`: on a
+        # 512 MB system two analyses at once is an OOM kill, and a job that waits
+        # its turn is the honest version of that. The wait is a span of its own,
+        # because under load it is where the time goes.
+        slots = capacity.get_slots()
+        before = slots.snapshot()
+        t_wait = time.perf_counter()
+        ahead = {
+            "contour.slots.running": before["running"],
+            "contour.slots.waiting": before["waiting"],
+        }
+        with telemetry.span("analysis.queue_wait", ahead):
+            slots.acquire()
+        waited = time.perf_counter() - t_wait
+        telemetry.record_queue_wait(kind, waited)
+        try:
+            record = _execute(job_id, record, progress, target, options, analyse)
+        finally:
+            slots.release()
+            release_memory()
+        state = str((record.progress or {}).get("state", "unknown"))
+        telemetry.annotate(**{"contour.job.state": state, "contour.job.queue_wait_s": waited})
+        telemetry.record_job(kind, state)
+        return record
 
 
 def _execute(
@@ -217,8 +237,10 @@ def _execute(
         # A trace id travels with the failure, as it does on every synchronous
         # error. Without one the reason reaches the screen but nothing connects
         # it to the log line that has the traceback -- which is the whole point
-        # of quoting an id to a user.
-        trace_id = uuid.uuid4().hex[:12]
+        # of quoting an id to a user. With telemetry on it is the job's trace,
+        # whose failed stage span carries the exception.
+        telemetry.record_exception(exc)
+        trace_id = telemetry.current_trace_id() or uuid.uuid4().hex[:12]
         progress.error = {**_describe_failure(exc), "trace_id": trace_id}
         # A step already recorded its own failure via the reporter; if the throw
         # came from outside a stage (bad options, say) nothing has, so the job
@@ -256,7 +278,7 @@ def _execute(
             "type": "/errors/internal",
             "title": "Analysis could not be finalised",
             "detail": f"{type(exc).__name__}: {exc}",
-            "trace_id": uuid.uuid4().hex[:12],
+            "trace_id": telemetry.current_trace_id() or uuid.uuid4().hex[:12],
         }
         _force_settle(progress, f"{type(exc).__name__}: {exc}")
 

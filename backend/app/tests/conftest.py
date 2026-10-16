@@ -8,6 +8,10 @@ from pathlib import Path
 
 import pytest
 
+# `otel`: in-memory OpenTelemetry pipelines, for tests that read what the app
+# emits. Registered here so every test module can ask for it by name.
+from app.tests.otel_capture import otel  # noqa: F401
+
 # Set before app.config is imported anywhere, so tests never read a developer's
 # real .env or reach a real database.
 #

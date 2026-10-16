@@ -33,6 +33,7 @@ from typing import Any
 
 import numpy as np
 
+from app.core import telemetry
 from app.core.logging import get_logger
 from app.providers.base import ProviderUnavailableError
 from app.providers.landcover.worldcover import LandCover
@@ -99,10 +100,12 @@ def cached_soil(
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
             log.info("soil cache hit", lon=round(lon, 4), lat=round(lat, 4))
+            telemetry.record_cache("soil", hit=True)
             return SoilProfile(**raw)
         except (OSError, ValueError, TypeError) as exc:
             log.warning("soil cache unreadable", error=str(exc))
 
+    telemetry.record_cache("soil", hit=False)
     if demo_mode:
         raise _blocked("soilgrids")
 
@@ -161,6 +164,7 @@ def cached_landcover(
                 codes = bundle["codes"]
             extra = json.loads(meta.read_text(encoding="utf-8"))
             log.info("landcover cache hit", shape=list(shape))
+            telemetry.record_cache("land_cover", hit=True)
             return LandCover(
                 codes=codes.astype(np.uint8),
                 fractions=extra["fractions"],
@@ -170,6 +174,7 @@ def cached_landcover(
         except (OSError, ValueError, KeyError) as exc:
             log.warning("landcover cache unreadable", error=str(exc))
 
+    telemetry.record_cache("land_cover", hit=False)
     if demo_mode:
         raise _blocked("worldcover")
 

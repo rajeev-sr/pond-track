@@ -29,6 +29,7 @@ from typing import Any
 
 import numpy as np
 
+from app.core import telemetry
 from app.providers.base import ProviderUnavailableError
 from app.providers.rainfall import nasa_power, open_meteo
 from app.providers.rainfall.base import RainfallStats
@@ -162,15 +163,23 @@ def fetch_ensemble(
     members: dict[str, RainfallStats] = {}
     failures: list[dict[str, str]] = []
 
+    def traced(name: str, fetch: Callable[..., RainfallStats]) -> Callable[[], RainfallStats]:
+        # A span per source, so a trace shows the two side by side: which one
+        # answered, which was refused, and how long the refusal took to arrive.
+        return lambda: telemetry.traced(
+            f"rainfall.{name}", lambda: fetch(lon, lat, years), {"contour.source": name}
+        )
+
     # Not a `with` block: leaving one joins every thread, so the slowest source
     # would hold back the answer the others already gave.
     pool = ThreadPoolExecutor(max_workers=len(SOURCES))
     try:
-        futures = {name: pool.submit(fetch, lon, lat, years) for name, fetch in SOURCES}
+        futures = {name: pool.submit(traced(name, fetch)) for name, fetch in SOURCES}
         wait(list(futures.values()), timeout=budget_s)
 
         for name, future in futures.items():
             if not future.done():
+                telemetry.record_rainfall_source(name, "no_answer")
                 failures.append(
                     {
                         "source": name,
@@ -180,9 +189,12 @@ def fetch_ensemble(
                 continue
             try:
                 members[name] = future.result()
+                telemetry.record_rainfall_source(name, "ok")
             except ProviderUnavailableError as exc:
+                telemetry.record_rainfall_source(name, "failed")
                 failures.append({"source": name, "reason": exc.detail})
             except Exception as exc:  # a provider bug must not lose the other source
+                telemetry.record_rainfall_source(name, "failed")
                 log.exception("rainfall_source_failed", extra={"source": name})
                 failures.append({"source": name, "reason": type(exc).__name__})
     finally:
