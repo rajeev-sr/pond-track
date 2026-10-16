@@ -29,6 +29,8 @@ import numpy as np
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
+from app.core import telemetry
+
 log = logging.getLogger(__name__)
 
 #: Each source's grid resolution in degrees, as (latitude, longitude).
@@ -143,10 +145,21 @@ def read(source: str, lon: float, lat: float, start: dt.date, end: dt.date) -> C
     cell = cell_for(source, lon, lat)
     rows = _query(source, cell, start, end)
     if rows is None:
+        # No database: neither a hit nor a miss, so not counted as either.
         return None
 
     expected = (end - start).days + 1
-    if not rows or len(rows) / expected < MIN_COVERAGE:
+    hit = bool(rows) and len(rows) / expected >= MIN_COVERAGE
+    telemetry.record_cache("rainfall", hit=hit)
+    telemetry.annotate(
+        **{
+            "contour.rainfall.cell": cell.key,
+            "contour.rainfall.cell_offset_km": cell.offset_km,
+            "contour.cache.hit": hit,
+            "contour.cache.days": len(rows),
+        }
+    )
+    if not hit:
         if rows:
             log.info(
                 "rainfall_cache_partial",

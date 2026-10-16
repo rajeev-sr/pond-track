@@ -13,8 +13,10 @@ from app.config import get_settings
 
 @lru_cache
 def get_engine() -> Engine:
+    from app.core import telemetry
+
     s = get_settings()
-    return create_engine(
+    engine = create_engine(
         s.database_url,
         pool_pre_ping=True,  # survives PostGIS restarts without a stale-conn error
         # Fail in seconds, not the minutes a TCP connect to a host that drops
@@ -25,6 +27,10 @@ def get_engine() -> Engine:
         max_overflow=10,
         echo=False,
     )
+    # A span per statement. Here rather than at startup because this engine is
+    # built lazily, on the first query, long after telemetry was set up.
+    telemetry.instrument_engine(engine)
+    return engine
 
 
 @lru_cache

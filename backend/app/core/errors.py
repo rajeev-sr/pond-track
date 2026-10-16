@@ -16,6 +16,8 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from app.core import telemetry
+
 CONTENT_TYPE = "application/problem+json"
 
 
@@ -110,6 +112,9 @@ def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(ProblemError)
     async def _problem(request: Request, exc: ProblemError) -> JSONResponse:
         trace = _trace_id(request)
+        # On the request span, so traces can be searched by what went wrong --
+        # a 4xx leaves the span's status unset, as the HTTP conventions require.
+        telemetry.mark_problem(exc.type, exc.status)
         log.warning(
             "request_failed",
             type=exc.type,
@@ -210,6 +215,9 @@ def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(Exception)
     async def _unhandled(request: Request, _exc: Exception) -> JSONResponse:
         trace = _trace_id(request)
+        # The traceback goes on the span as an `exception` event: the client is
+        # never shown it, but whoever opens the trace by its id is.
+        telemetry.record_exception(_exc)
         log.exception("unhandled_exception", path=request.url.path, trace_id=trace)
         # Never leak a stack trace to the client (HLD 5.1, 2.6).
         return JSONResponse(

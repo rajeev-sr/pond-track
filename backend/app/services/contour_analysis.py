@@ -16,7 +16,8 @@ from __future__ import annotations
 
 import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,6 +26,7 @@ from typing import Any, Literal, Protocol
 import numpy as np
 import numpy.typing as npt
 
+from app.core import telemetry
 from app.core.crs import is_within_india
 from app.providers.elevation import copernicus_aws
 from app.providers.elevation.base import Bounds, DemGrid
@@ -278,26 +280,47 @@ class StageReporter(Protocol):
 
 
 def _stage_runner(reporter: StageReporter | None, timings: dict[str, float]) -> Any:
-    """Time a stage and tell the reporter it started, finished or failed."""
+    """Time a stage and tell the reporter it started, finished or failed.
+
+    Each stage is also a span, so a trace of an analysis reads as the pipeline
+    does -- terrain, condition, flow, enrichment, siting, catchments -- with
+    every provider call and SQL statement nested under the stage that made it.
+    """
 
     def stage(name: str, fn: Any) -> Any:
         t = time.perf_counter()
         if reporter is not None:
             reporter.start_step(name)
-        try:
-            out = fn()
-        except Exception as exc:
-            # The reporter is told before the exception propagates, so a failed
-            # job records *which* stage died rather than only that it did.
-            if reporter is not None:
-                reporter.fail_step(name, f"{type(exc).__name__}: {exc}")
-            raise
+        with telemetry.span(f"stage.{name}", {"contour.stage": name}):
+            try:
+                out = fn()
+            except Exception as exc:
+                # The reporter is told before the exception propagates, so a failed
+                # job records *which* stage died rather than only that it did.
+                telemetry.record_stage(name, time.perf_counter() - t, ok=False)
+                if reporter is not None:
+                    reporter.fail_step(name, f"{type(exc).__name__}: {exc}")
+                raise
         timings[name] = time.perf_counter() - t
+        telemetry.record_stage(name, timings[name], ok=True)
         if reporter is not None:
             reporter.finish_step(name)
         return out
 
     return stage
+
+
+@contextmanager
+def _traced_analysis(kind: str, attributes: dict[str, Any]) -> Iterator[None]:
+    """One span and one duration sample per analysis, however it ends."""
+    t0 = time.perf_counter()
+    ok = False
+    with telemetry.span(f"analysis.{kind}", {"contour.input": kind, **attributes}):
+        try:
+            yield
+            ok = True
+        finally:
+            telemetry.record_analysis(kind, time.perf_counter() - t0, ok=ok)
 
 
 def analyze_contour_map(
@@ -321,22 +344,31 @@ def analyze_contour_map(
     timings: dict[str, float] = {}
     stage = _stage_runner(reporter, timings)
 
-    parsed = stage("parse", lambda: parse_contour_file(data, filename))
-    dem, interp = stage(
-        "interpolate", lambda: contours_to_dem(parsed, cell_size_m=opts.cell_size_m)
-    )
-    source = TerrainSource(
-        kind="uploaded_contour_map",
-        bounds=parsed.bounds,
-        grid_bounds=parsed.bounds,
-        info=_contour_source_info(parsed, dem, filename),
-        parsed=parsed,
-        interpolation=interp,
-        filename=filename,
-        size_bytes=len(data),
-        warnings=list(parsed.warnings),
-    )
-    return _analyse(dem, source, opts, stage, timings, t_total)
+    with _traced_analysis(
+        "contour", {"contour.filename": filename or "", "contour.upload_bytes": len(data)}
+    ):
+        parsed = stage("parse", lambda: parse_contour_file(data, filename))
+        telemetry.annotate(
+            **{
+                "contour.lines": len(parsed.lines),
+                "contour.elevation_strategy": parsed.elevation_strategy,
+            }
+        )
+        dem, interp = stage(
+            "interpolate", lambda: contours_to_dem(parsed, cell_size_m=opts.cell_size_m)
+        )
+        source = TerrainSource(
+            kind="uploaded_contour_map",
+            bounds=parsed.bounds,
+            grid_bounds=parsed.bounds,
+            info=_contour_source_info(parsed, dem, filename),
+            parsed=parsed,
+            interpolation=interp,
+            filename=filename,
+            size_bytes=len(data),
+            warnings=list(parsed.warnings),
+        )
+        return _analyse(dem, source, opts, stage, timings, t_total)
 
 
 def analyze_area(
@@ -372,34 +404,40 @@ def analyze_area(
     timings: dict[str, float] = {}
     stage = _stage_runner(reporter, timings)
 
-    dem, was_cached = stage(
-        "terrain",
-        lambda: copernicus_aws.cached_fetch_dem(
-            box.bounds, store=cache_dir, buffer_m=float(settings.AOI_BUFFER_M), fetch=fetch
-        ),
-    )
-    inside = area_service.inside_mask(dem, box)
-    if not inside.any():
-        raise area_service.AreaError(
-            "the selected rectangle does not cover a single cell of the terrain grid"
+    # After validation: a malformed box is the caller's error, not a failed
+    # analysis, and must not count as one.
+    with _traced_analysis(
+        "area", {"contour.area_km2": box.area_km2, "contour.bbox": box.as_list()}
+    ):
+        dem, was_cached = stage(
+            "terrain",
+            lambda: copernicus_aws.cached_fetch_dem(
+                box.bounds, store=cache_dir, buffer_m=float(settings.AOI_BUFFER_M), fetch=fetch
+            ),
         )
+        telemetry.record_cache("dem", hit=bool(was_cached))
+        inside = area_service.inside_mask(dem, box)
+        if not inside.any():
+            raise area_service.AreaError(
+                "the selected rectangle does not cover a single cell of the terrain grid"
+            )
 
-    warnings: list[str] = []
-    lon, lat = box.bounds.centroid
-    if not is_within_india(lon, lat):
-        warnings.append(
-            "the selected area lies outside India; it is analysed all the same, but "
-            "the Indian runoff cross-checks and the village register do not apply"
+        warnings: list[str] = []
+        lon, lat = box.bounds.centroid
+        if not is_within_india(lon, lat):
+            warnings.append(
+                "the selected area lies outside India; it is analysed all the same, but "
+                "the Indian runoff cross-checks and the village register do not apply"
+            )
+        source = TerrainSource(
+            kind="copernicus_glo30",
+            bounds=box.bounds,
+            grid_bounds=area_service.grid_bounds_4326(dem),
+            info=_area_source_info(box, dem, was_cached, int(inside.sum())),
+            area=box,
+            warnings=warnings,
         )
-    source = TerrainSource(
-        kind="copernicus_glo30",
-        bounds=box.bounds,
-        grid_bounds=area_service.grid_bounds_4326(dem),
-        info=_area_source_info(box, dem, was_cached, int(inside.sum())),
-        area=box,
-        warnings=warnings,
-    )
-    return _analyse(dem, source, opts, stage, timings, t_total, site_mask=inside)
+        return _analyse(dem, source, opts, stage, timings, t_total, site_mask=inside)
 
 
 def _analyse(
@@ -483,6 +521,20 @@ def _analyse(
             f"no candidate pond site met the constraints{where}; the analysis of the "
             "terrain itself is still reported above"
         )
+
+    # The answer, on the analysis span: a trace can then be found by its
+    # outcome ("every terrain_only run today") and read without the response.
+    best = _summary(sites[0] if sites else None)
+    telemetry.annotate(
+        **{
+            "contour.grid.cells": int(dem.elevation.size),
+            "contour.grid.cell_size_m": float(dem.cell_size_m),
+            "contour.tier": enrichment.tier,
+            "contour.sites": len(sites),
+            "contour.result.expected_water_m3": best.get("expected_water_volume_m3"),
+            "contour.result.catchment_ha": best.get("catchment_area_ha"),
+        }
+    )
 
     return ContourAnalysis(
         analysis_id=uuid.uuid4().hex[:16],

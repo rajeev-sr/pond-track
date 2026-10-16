@@ -25,9 +25,14 @@ def _redact(_logger: WrappedLogger, _name: str, event: EventDict) -> EventDict:
 
 
 def configure_logging(level: str = "INFO", json_output: bool = True) -> None:
+    from app.core import telemetry
+
     logging.basicConfig(
         format="%(message)s", stream=sys.stdout, level=getattr(logging, level.upper(), logging.INFO)
     )
+    # After basicConfig, never before: a handler already on the root logger makes
+    # basicConfig decline to add the console one. A no-op with telemetry off.
+    telemetry.attach_log_handler()
     renderer = (
         structlog.processors.JSONRenderer()
         if json_output
@@ -41,6 +46,8 @@ def configure_logging(level: str = "INFO", json_output: bool = True) -> None:
             _redact,
             structlog.processors.StackInfoRenderer(),
             structlog.processors.format_exc_info,
+            # After redaction, so a secret is masked in the exported copy too.
+            telemetry.structlog_processor,
             renderer,
         ],
         wrapper_class=structlog.make_filtering_bound_logger(
@@ -52,4 +59,10 @@ def configure_logging(level: str = "INFO", json_output: bool = True) -> None:
 
 
 def get_logger(name: str = "contour") -> Any:
-    return structlog.get_logger(name)
+    # The name as an initial value, not a positional argument: PrintLoggerFactory
+    # ignores positional arguments, so the module a line came from was lost. An
+    # initial value is bound lazily, on first use, under whatever configuration
+    # is current then -- binding it eagerly here, at import time, would freeze
+    # these module-level loggers on structlog's unconfigured defaults. Not
+    # `logger=`: that is `wrap_logger`'s own first parameter.
+    return structlog.get_logger(name, logger_name=name)

@@ -5,13 +5,17 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 
+from app.core import telemetry
 from app.core.errors import BusyProblem
 from app.core.memory import release_memory
 from app.services import capacity
 
 
-def _busy(detail: str) -> BusyProblem:
+def _busy(detail: str, *, reason: str) -> BusyProblem:
     slots = capacity.get_slots()
+    # Counted by which limit refused it: a run of `slots_busy` says users need
+    # jobs, a run of `queue_full` says the instance needs company.
+    telemetry.record_rejection(reason)
     return BusyProblem(
         detail=detail,
         headers={"Retry-After": str(capacity.RETRY_AFTER_S)},
@@ -30,7 +34,8 @@ def analysis_slot() -> Iterator[None]:
             f"this server is already running {slots.limit} analysis{plural}, which is all "
             f"its memory allows. Try again in about {capacity.RETRY_AFTER_S} s -- or start "
             "it as a job (POST /api/v1/analysis or /api/v1/analysis/area), which waits "
-            "for a free slot instead of being refused."
+            "for a free slot instead of being refused.",
+            reason="slots_busy",
         )
     try:
         yield
@@ -44,5 +49,6 @@ def refuse_when_queue_full() -> None:
     if capacity.get_slots().queue_full():
         raise _busy(
             f"{capacity.MAX_WAITING_JOBS} analyses are already waiting on this server. "
-            f"Try again in about {capacity.RETRY_AFTER_S} s."
+            f"Try again in about {capacity.RETRY_AFTER_S} s.",
+            reason="queue_full",
         )

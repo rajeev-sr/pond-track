@@ -30,6 +30,7 @@ from rasterio.enums import Resampling
 from rasterio.warp import reproject
 from rasterio.windows import from_bounds
 
+from app.core import telemetry
 from app.core.crs import CRSGuard, utm_epsg_for
 from app.providers.base import Provenance, ProviderUnavailableError
 from app.providers.elevation.base import Bounds, DemGrid
@@ -184,31 +185,40 @@ def fetch_dem(
     # which is a different answer from "the bucket could not be reached".
     absent: list[str] = []
     for name in names:
-        try:
-            with rasterio.open(tile_source(name)) as src:
-                window = from_bounds(*read.as_tuple(), src.transform)
-                block = src.read(1, window=window, boundless=True, fill_value=np.nan)
-                if block.size == 0 or not np.isfinite(block).any():
+        source_path = tile_source(name)
+        # A span per tile, by hand: GDAL reads a remote COG over its own HTTP
+        # client, which no Python instrumentation sees, so without this a cold
+        # read from S3 would show only as unexplained time in the terrain stage.
+        with telemetry.span(
+            "copernicus.tile",
+            {"contour.tile": name, "contour.tile.remote": source_path.startswith("http")},
+        ):
+            try:
+                with rasterio.open(source_path) as src:
+                    window = from_bounds(*read.as_tuple(), src.transform)
+                    block = src.read(1, window=window, boundless=True, fill_value=np.nan)
+                    if block.size == 0 or not np.isfinite(block).any():
+                        absent.append(name)
+                        continue
+                    out = np.full((n_rows, n_cols), np.nan, dtype=np.float32)
+                    reproject(
+                        source=block,
+                        destination=out,
+                        src_transform=src.window_transform(window),
+                        src_crs=src.crs,
+                        dst_transform=transform,
+                        dst_crs=f"EPSG:{epsg}",
+                        resampling=Resampling.bilinear,
+                        src_nodata=np.nan,
+                        dst_nodata=np.nan,
+                    )
+                    dst = np.where(np.isnan(dst), out, dst)
+                    used.append(name)
+            except Exception as exc:
+                telemetry.annotate(**{"contour.tile.error": type(exc).__name__})
+                if "404" in str(exc):
                     absent.append(name)
-                    continue
-                out = np.full((n_rows, n_cols), np.nan, dtype=np.float32)
-                reproject(
-                    source=block,
-                    destination=out,
-                    src_transform=src.window_transform(window),
-                    src_crs=src.crs,
-                    dst_transform=transform,
-                    dst_crs=f"EPSG:{epsg}",
-                    resampling=Resampling.bilinear,
-                    src_nodata=np.nan,
-                    dst_nodata=np.nan,
-                )
-                dst = np.where(np.isnan(dst), out, dst)
-                used.append(name)
-        except Exception as exc:
-            if "404" in str(exc):
-                absent.append(name)
-            errors.append(f"{name}: {type(exc).__name__}")
+                errors.append(f"{name}: {type(exc).__name__}")
 
     if not used:
         if names and len(absent) == len(names):

@@ -13,6 +13,7 @@ from fastapi.responses import HTMLResponse
 
 from app.api.v1.router import api_router
 from app.config import get_settings
+from app.core import telemetry
 from app.core.errors import register_exception_handlers
 from app.core.logging import configure_logging, get_logger
 
@@ -27,7 +28,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     # M0-17: fail fast on anything fatal, warn about optional capabilities.
     warnings = s.validate_startup()
-    log.info("starting", **s.startup_report())
+    log.info("starting", **s.startup_report(), telemetry=telemetry.status())
     for w in warnings:
         log.warning("capability_unavailable", detail=w)
     # Terrain acquisition needs no credential (Copernicus GLO-30 open bucket),
@@ -35,6 +36,9 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     # unconfigured has already been logged above as a capability warning.
     yield
     log.info("shutdown")
+    # Batch exporters hold up to a few seconds of spans, metrics and logs; a
+    # restart that skipped this would lose the last requests before it.
+    telemetry.shutdown()
 
 
 #: Pinned deliberately -- see the `/redoc` route below for what a moving tag did.
@@ -43,6 +47,8 @@ REDOC_JS_URL = "https://cdn.jsdelivr.net/npm/redoc@2.5.3/bundles/redoc.standalon
 
 def create_app() -> FastAPI:
     s = get_settings()
+    # Before anything can open a span. Inert without OTEL_EXPORTER_OTLP_ENDPOINT.
+    telemetry.setup()
     app = FastAPI(
         title="Contour - AI-based Village Pond Planning System",
         description=(
@@ -85,10 +91,21 @@ def create_app() -> FastAPI:
 
     @app.middleware("http")
     async def _trace(request: Request, call_next):  # type: ignore[no-untyped-def]
-        """Attach a trace id so every log line and error body can be correlated."""
-        request.state.trace_id = request.headers.get("X-Request-ID") or uuid.uuid4().hex[:12]
+        """Attach a trace id so every log line and error body can be correlated.
+
+        With telemetry on it is the OpenTelemetry trace id, so the id an error
+        page shows is the one to paste into Jaeger, and every response says it
+        in `X-Trace-Id`. `X-Request-ID` keeps its own meaning: the caller's id,
+        echoed back -- and behind the gateway every request has one, nginx's
+        `$request_id`, which is not a trace id and finds nothing in Jaeger.
+        """
+        offered = request.headers.get("X-Request-ID")
+        otel_trace_id = telemetry.current_trace_id()
+        request.state.trace_id = otel_trace_id or offered or uuid.uuid4().hex[:12]
         response = await call_next(request)
-        response.headers["X-Request-ID"] = request.state.trace_id
+        response.headers["X-Request-ID"] = offered or request.state.trace_id
+        if otel_trace_id:
+            response.headers["X-Trace-Id"] = otel_trace_id
         return response
 
     register_exception_handlers(app)
@@ -107,6 +124,9 @@ def create_app() -> FastAPI:
             get_logger("startup").warning(
                 "frontend_not_served", detail=f"FRONTEND_DIST={dist} has no index.html"
             )
+    # Last, once every middleware is registered: it hooks the stack as it is
+    # built so its own middleware is the outermost and sees every request.
+    telemetry.instrument_app(app)
     return app
 
 

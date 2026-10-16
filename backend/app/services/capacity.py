@@ -17,6 +17,8 @@ from __future__ import annotations
 import threading
 from typing import Any
 
+from app.core import telemetry
+
 #: Jobs allowed to wait for a slot before new ones are refused with 503. Each
 #: holds a threadpool worker while it waits; the pool is 40 threads, and the
 #: synchronous routes need some of them too.
@@ -96,3 +98,26 @@ def reset_slots() -> None:
     global _slots
     with _slots_lock:
         _slots = None
+
+
+def _observe_slots() -> list[tuple[float, dict[str, Any]]]:
+    """The slots as a gauge: how many analyses run, wait, and may run at once.
+
+    Read at each metric export, so the dashboard shows the queue as it stood
+    then -- `waiting` climbing towards MAX_WAITING_JOBS is the warning that the
+    next job start will be a 503.
+    """
+    snap = get_slots().snapshot()
+    return [
+        (float(snap["running"]), {"contour.state": "running"}),
+        (float(snap["waiting"]), {"contour.state": "waiting"}),
+        (float(snap["limit"]), {"contour.state": "limit"}),
+    ]
+
+
+telemetry.register_gauge(
+    "contour.analysis.slots",
+    "Analysis slots of this instance: running, waiting for a slot, and the limit.",
+    "{analysis}",
+    _observe_slots,
+)

@@ -21,6 +21,18 @@ tenacity==9.0.0
 
 # ── Observability ────────────────────────────────────────────────────────────
 structlog==24.4.0
+# OpenTelemetry: traces, metrics and logs exported over OTLP/HTTP. Inert unless
+# OTEL_EXPORTER_OTLP_ENDPOINT is set -- see app/core/telemetry.py. The HTTP
+# exporter rather than gRPC keeps grpcio (~30 MB of native code) out of an image
+# that has to fit a 512 MB lab system.
+opentelemetry-api==1.44.0
+opentelemetry-sdk==1.44.0
+opentelemetry-exporter-otlp-proto-http==1.44.0
+opentelemetry-instrumentation-fastapi==0.65b0
+opentelemetry-instrumentation-httpx==0.65b0
+opentelemetry-instrumentation-logging==0.65b0
+opentelemetry-instrumentation-sqlalchemy==0.65b0
+opentelemetry-instrumentation-threading==0.65b0
 
 # ── Untrusted XML (KML uploads) ──────────────────────────────────────────────
 defusedxml==0.7.1
