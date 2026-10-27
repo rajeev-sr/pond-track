@@ -1,0 +1,10 @@
+apiVersion: 1
+
+providers:
+  - name: contour
+    folder: Contour
+    type: file
+    disableDeletion: true
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards

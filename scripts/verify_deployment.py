@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import http.client
+import http.cookiejar
 import json
 import socket
 import time
@@ -49,11 +50,16 @@ class _QuickConnectHandler(urllib.request.HTTPHandler):
         return self.do_open(_QuickConnect, req)
 
 
-_opener = urllib.request.build_opener(_QuickConnectHandler)
 
 
 class Client:
     def __init__(self, base: str, tries: int = 3) -> None:
+        # Cookies kept, as a browser keeps them: starting a drawn-area run pins
+        # the browser to the gateway's area pool with one, and without it the
+        # follow-up calls could reach an instance that never saw the terrain.
+        self.opener = urllib.request.build_opener(
+            _QuickConnectHandler, urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())
+        )
         self.base = base.rstrip("/")
         self.id = uuid.uuid4().hex[:24]
         self.tries = tries
@@ -76,7 +82,7 @@ class Client:
                 self.base + path, data=body, method=method, headers=headers
             )
             try:
-                with _opener.open(req, timeout=timeout) as r:
+                with self.opener.open(req, timeout=timeout) as r:
                     return r.status, r.read(), dict(r.headers)
             except urllib.error.HTTPError as e:
                 return e.code, e.read(), dict(e.headers)

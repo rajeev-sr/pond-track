@@ -379,13 +379,17 @@ cache:
 (cd frontend && npm ci && npm run build)             # once: the UI each API serves
 deploy/supervise.sh api deploy/run-api.sh 4000       # on each system
 python3 deploy/render_gateway.py --port 3000 --run-dir ~/contour-run \
-    --api 172.17.0.75:4000 --api 172.17.0.76:4000 --api 172.17.0.77:4000
+    --api 10.1.75.53:4274 --api 10.1.75.53:4275 --api 10.1.75.53:4276 \
+    --area-api 10.1.75.53:4274 --area-api 10.1.75.53:4275
 deploy/supervise.sh gateway nginx -c ~/contour-run/nginx.conf -g 'daemon off;'   # sys2
 ```
 
 The lab publishes each system's internal ports 3000–7000 on 10.1.75.53 as
 *internal + 272 + n* for system *n*, so the gateway on sys2's port 3000 is the
-public 3274; the systems reach each other directly on 172.17.0.x.
+public 3274. Their internal 172.17.0.x addresses change whenever the lab restarts the containers,
+so the gateway and the database connections use the published ports instead (the database runs
+on sys4's port 5000, published as 5276). Drawn areas go only to sys2 and sys3, which hold the
+terrain tiles: starting one sets a cookie that keeps the browser's follow-up calls there.
 
 - **One analysis per system** (`MAX_CONCURRENT_ANALYSES=1`): a direct API call
   beyond that gets `503` with `Retry-After`; a run from the UI waits in a queue.
@@ -422,6 +426,21 @@ served as fast as one on one (1.0 s for the sample area, 11 s for the sample
 sheet), six users queue without a failure, process memory peaks at 403 MB of
 512, and a killed instance's user is served by another system at 1.5 s and back
 on their own at 21.8 s without a request lost. Details: [docs/SUBMISSION_PLAN.md](docs/SUBMISSION_PLAN.md).
+
+### Observability (OpenTelemetry)
+
+Traces, metrics and logs go from the API instances and the browser to an OpenTelemetry
+Collector, then to Jaeger, Prometheus and Loki, shown in Grafana. Telemetry is off unless
+`OTEL_EXPORTER_OTLP_ENDPOINT` is set, so the lab deployment is unchanged.
+
+```bash
+(cd frontend && VITE_OTEL_TRACES_URL=http://localhost:4318/v1/traces npm run build)
+deploy/observability/up.sh               # the emulation + collector, Jaeger :16686, Grafana :3000
+python3 scripts/telemetry_demo.py        # traffic, then checks every signal in its backend
+```
+
+What is instrumented, how to demonstrate it, and what it found:
+[docs/OPENTELEMETRY.md](docs/OPENTELEMETRY.md). The report: [docs/otel-report/main.pdf](docs/otel-report/main.pdf).
 
 ---
 
@@ -506,6 +525,8 @@ Priority-Flood + ε (Barnes, Lehman & Mulla 2014).
 | [docs/API.md](docs/API.md) | API reference with worked `curl` examples |
 | [docs/INSTALL.md](docs/INSTALL.md) | Installation guide |
 | [docs/REPORT_CONTOUR_API.md](docs/REPORT_CONTOUR_API.md) | Report for the contour-API phase |
+| [docs/OPENTELEMETRY.md](docs/OPENTELEMETRY.md) | OpenTelemetry: running the stack, what is instrumented, demonstrating it |
+| [docs/otel-report/main.pdf](docs/otel-report/main.pdf) | Report for the OpenTelemetry assignment |
 
 `python3 progress.py` prints build progress and the next startable tasks.
 

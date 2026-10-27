@@ -1,0 +1,21 @@
+# Prometheus scrapes the collector, not the API instances: the app pushes OTLP
+# and never exposes a /metrics endpoint of its own.
+
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  # Contour's metrics, re-exposed by the collector's prometheus exporter.
+  - job_name: contour
+    # Keep the job/instance labels the exporter derives from service.name and
+    # service.instance.id, instead of overwriting them with the collector's.
+    honor_labels: true
+    static_configs:
+      - targets: ["otel-collector:8889"]
+
+  # The collector's own health: spans, points and log records accepted,
+  # refused and exported -- the pipeline watching itself.
+  - job_name: otel-collector
+    static_configs:
+      - targets: ["otel-collector:8888"]

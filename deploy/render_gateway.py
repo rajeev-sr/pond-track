@@ -3,10 +3,11 @@
 
 Stdlib only, so it runs on a lab system with nothing installed:
 
-    # the lab: sys1 public 3273 in front of the four API instances
-    python3 deploy/render_gateway.py --port 3273 --run-dir ~/contour-run \\
-        --api 10.1.75.53:4273 --api 10.1.75.53:4274 \\
-        --api 10.1.75.53:4275 --api 10.1.75.53:4276
+    # the lab: sys2's port 3000 (public 3274) in front of three API instances,
+    # drawn areas on the two that hold terrain tiles
+    python3 deploy/render_gateway.py --port 3000 --run-dir ~/contour-run \\
+        --api 172.17.0.75:4000 --api 172.17.0.76:4000 --api 172.17.0.77:4000 \\
+        --area-api 172.17.0.75:4000 --area-api 172.17.0.76:4000
 
     # the local four-system emulation (deploy/lab/compose.yml)
     python3 deploy/render_gateway.py --lab
@@ -23,14 +24,47 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 LAB_APIS = ["api-1:8000", "api-2:8000", "api-3:8000", "api-4:8000"]
+#: Docker's embedded DNS server, as seen from inside any container.
+DOCKER_DNS = "127.0.0.11"
 
 
-def render_gateway(port: int, apis: list[str]) -> str:
-    upstreams = "\n".join(
-        f"    server {api} max_fails=2 fail_timeout=20s;" for api in apis
-    )
+def _servers(apis: list[str], *, zone: str | None = None) -> str:
+    """The upstream's `server` lines.
+
+    With `zone`, nginx keeps re-resolving the names while it runs (`resolve`,
+    open-source nginx >= 1.27.3) instead of once at start-up. Under Docker a
+    container that is stopped and started can come back on another address --
+    and its old one handed to a different container. Resolved once, the gateway
+    then sends that instance's traffic to whichever container holds the address
+    now: found in the observability demo, where traces showed drawn areas
+    served by sys4, which the area pool does not include.
+    """
+    lines = []
+    if zone:
+        lines += [f"    zone {zone} 64k;", f"    resolver {DOCKER_DNS} valid=5s ipv6=off;"]
+    suffix = " resolve" if zone else ""
+    lines += [f"    server {api} max_fails=2 fail_timeout=20s{suffix};" for api in apis]
+    return "\n".join(lines)
+
+
+def render_gateway(
+    port: int,
+    apis: list[str],
+    area_apis: list[str] | None = None,
+    *,
+    docker_dns: bool = False,
+) -> str:
+    """`area_apis`: the instances that hold terrain tiles; every instance if not given.
+    `docker_dns`: the API names are Docker containers, to be re-resolved."""
     text = (HERE / "nginx" / "gateway.conf.in").read_text()
-    return text.replace("@UPSTREAMS@", upstreams).replace("@PORT@", str(port))
+    return (
+        text.replace("@UPSTREAMS@", _servers(apis, zone="contour_api" if docker_dns else None))
+        .replace(
+            "@AREA_UPSTREAMS@",
+            _servers(area_apis or apis, zone="contour_area" if docker_dns else None),
+        )
+        .replace("@PORT@", str(port))
+    )
 
 
 def main() -> int:
@@ -40,10 +74,21 @@ def main() -> int:
         "--api", action="append", default=[], help="host:port, repeatable"
     )
     parser.add_argument(
+        "--area-api",
+        action="append",
+        default=[],
+        help="an instance that holds terrain tiles, repeatable (default: every --api)",
+    )
+    parser.add_argument(
         "--run-dir", type=Path, help="write nginx.conf + gateway.conf here"
     )
     parser.add_argument(
         "--lab", action="store_true", help="the local emulation's config"
+    )
+    parser.add_argument(
+        "--docker-dns",
+        action="store_true",
+        help="the --api names are Docker containers: keep re-resolving them",
     )
     args = parser.parse_args()
 
@@ -55,7 +100,7 @@ def main() -> int:
     if not args.api:
         parser.error("give at least one --api host:port")
 
-    gateway = render_gateway(args.port, args.api)
+    gateway = render_gateway(args.port, args.api, args.area_api, docker_dns=args.docker_dns)
     if args.run_dir is None:
         sys.stdout.write(gateway)
         return 0

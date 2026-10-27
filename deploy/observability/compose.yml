@@ -1,0 +1,172 @@
+# OpenTelemetry for the lab emulation: every API instance exports traces,
+# metrics and logs to a collector, which stores them in Jaeger, Prometheus and
+# Loki, all shown in Grafana. An overlay on deploy/lab/compose.yml:
+#
+#   (cd frontend && npm run build)
+#   deploy/observability/up.sh            # = docker compose -f deploy/lab/compose.yml \
+#                                         #     -f deploy/observability/compose.yml up -d
+#
+#   http://localhost:3273   Contour, through the gateway (as http://10.1.75.53:3274 on the lab)
+#   http://localhost:16686  Jaeger      -- traces
+#   http://localhost:3000   Grafana     -- the dashboard, logs (Loki) and traces in one place
+#   http://localhost:9090   Prometheus  -- raw metrics
+#
+# It mirrors the lab as deployed: sys2-sys4 serve, drawn areas go to sys2/sys3
+# only, sys1 is unused, and the database is PostgreSQL/PostGIS (sys4's). Each
+# API keeps the lab's 512 MB / 1 CPU limits from the base file.
+#
+# Paths below are relative to deploy/lab/ -- with several -f files, Compose
+# resolves every relative path against the directory of the first one.
+
+x-otel: &otel
+  # The whole of the app's telemetry configuration: the standard OTel variables.
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+  OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+  OTEL_SERVICE_NAME: contour-api
+  # The stable HTTP semantic conventions (http.request.method, url.full,
+  # http.response.status_code) rather than the instrumentation's older defaults,
+  # so the auto-generated spans use the same names as the request metrics.
+  OTEL_SEMCONV_STABILITY_OPT_IN: http
+  # Seconds matter in a demo: export metrics every 5 s (default 60) and flush
+  # spans and logs within a second (default 5).
+  OTEL_METRIC_EXPORT_INTERVAL: "5000"
+  OTEL_BSP_SCHEDULE_DELAY: "1000"
+  OTEL_BLRP_SCHEDULE_DELAY: "1000"
+  # The village register and the rainfall cache, as on the lab.
+  POSTGRES_HOST: postgis
+  POSTGRES_PORT: "5432"
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-contour_dev_only_change_me}
+  # No broker, as on the lab: not the base file's "dead port that fails
+  # instantly". Celery's worker ping does not fail instantly -- it retries for
+  # ~6 s, and every contour upload's 202 waited for it. Found in the traces: the
+  # upload start took 6.1 s, all of it in the celery.worker_check span.
+  REDIS_URL: ""
+
+x-api-deps: &api-deps
+  db-migrate: { condition: service_completed_successfully }
+  otel-collector: { condition: service_started }
+
+services:
+  api-1:
+    # sys1 was unreachable when the lab was deployed and serves nothing there.
+    profiles: ["sys1"]
+  api-2:
+    environment:
+      <<: *otel
+      OTEL_RESOURCE_ATTRIBUTES: service.instance.id=sys2,deployment.environment.name=lab-emulation
+    depends_on: *api-deps
+  api-3:
+    environment:
+      <<: *otel
+      OTEL_RESOURCE_ATTRIBUTES: service.instance.id=sys3,deployment.environment.name=lab-emulation
+    depends_on: *api-deps
+  api-4:
+    environment:
+      <<: *otel
+      OTEL_RESOURCE_ATTRIBUTES: service.instance.id=sys4,deployment.environment.name=lab-emulation
+    depends_on: *api-deps
+
+  gateway:
+    # Plain nginx is all the gateway needs; the config is the lab's layout.
+    image: nginx:1.27-alpine
+    volumes: !override
+      - ../observability/gateway.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on: !override [api-2, api-3, api-4]
+
+  postgis:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_DB: contour
+      POSTGRES_USER: contour
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-contour_dev_only_change_me}
+    command: ["postgres", "-c", "shared_buffers=64MB", "-c", "max_connections=50"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U contour -d contour"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  db-migrate:
+    image: contour-api:latest
+    working_dir: /work/contour/backend
+    user: "${UID:-1000}:${GID:-1000}"
+    entrypoint: ["alembic", "upgrade", "head"]
+    restart: "no"
+    volumes:
+      - ../..:/work/contour
+    environment:
+      PYTHONPATH: /work/contour/backend
+      HOME: /tmp
+      POSTGRES_HOST: postgis
+      POSTGRES_PORT: "5432"
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-contour_dev_only_change_me}
+    depends_on:
+      postgis: { condition: service_healthy }
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.160.0
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ../observability/otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "4318:4318"     # OTLP/HTTP: the browser exports its spans here
+      - "55679:55679"   # zPages: the collector's live view of its own pipelines
+    mem_limit: 512m
+    depends_on: [jaeger, loki]
+
+  jaeger:
+    # Jaeger v2's built-in all-in-one: OTLP in, in-memory storage, UI on 16686.
+    # 2.20, not 2.21: 2.21 dropped the legacy HTTP API (/api/services,
+    # /api/traces) for /api/v3 only, and Grafana's Jaeger data source still
+    # calls the legacy one -- its health check answers "404 Not Found".
+    image: jaegertracing/jaeger:2.20.0
+    ports:
+      - "16686:16686"
+
+  prometheus:
+    image: prom/prometheus:v3.13.3
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+      # Keeps the trace ids the collector attaches to latency buckets.
+      - --enable-feature=exemplar-storage
+    volumes:
+      - ../observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - promdata:/prometheus
+    ports:
+      - "9090:9090"
+
+  loki:
+    # The image's default config: single binary, filesystem storage, and the
+    # native OTLP endpoint (/otlp) with structured metadata enabled.
+    image: grafana/loki:3.6.15
+    command: ["-config.file=/etc/loki/local-config.yaml"]
+    volumes:
+      - lokidata:/loki
+    ports:
+      - "3100:3100"
+
+  grafana:
+    image: grafana/grafana:12.4.12
+    environment:
+      # A local demo: no login, and the Contour dashboard as the home page.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/contour.json
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    volumes:
+      - ../observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on: [prometheus, loki, jaeger]
+
+volumes:
+  pgdata:
+  promdata:
+  lokidata:

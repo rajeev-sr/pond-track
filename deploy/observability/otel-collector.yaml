@@ -1,0 +1,84 @@
+# OpenTelemetry Collector: the one address every Contour process exports to.
+#
+#   API instances / browser --OTLP/HTTP :4318--> collector --> Jaeger      (traces)
+#                                                          --> Prometheus  (metrics, scraped)
+#                                                          --> Loki        (logs)
+#
+# The app knows only the collector. Which backend stores what, and how, is
+# decided here -- swapping Jaeger for Tempo, or adding a second destination, is
+# a change to this file, not to the application.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+        # The browser exports its spans here directly, from the page's origin.
+        cors:
+          allowed_origins: ["http://localhost:*", "http://127.0.0.1:*"]
+          allowed_headers: ["*"]
+
+processors:
+  # First in every pipeline: refuse data before the collector itself runs out of
+  # memory, rather than being OOM-killed and losing everything it holds.
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 300
+    spike_limit_mib: 80
+  # Last: send in batches, not one request per span.
+  batch:
+    send_batch_size: 512
+    timeout: 2s
+
+exporters:
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    # Resource attributes (service.instance.id = sys2, ...) become labels, so a
+    # panel can split any metric by instance.
+    resource_to_telemetry_conversion:
+      enabled: true
+    # OpenMetrics carries exemplars: a sampled trace id on a latency bucket,
+    # which Grafana draws as a dot that opens the trace.
+    enable_open_metrics: true
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+  # Counts of what arrived, printed to the collector's own log -- the quickest
+  # proof that data is flowing at all.
+  debug:
+    verbosity: basic
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  zpages:
+    endpoint: 0.0.0.0:55679
+
+service:
+  extensions: [health_check, zpages]
+  telemetry:
+    metrics:
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 0.0.0.0
+                port: 8888
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp/jaeger, debug]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus, debug]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlphttp/loki, debug]
